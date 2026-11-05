@@ -11,25 +11,166 @@ import base64
 import logging
 import os
 import re
+import socket
 import ssl
+import sys
+import types
 import urllib.request
 import warnings
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from threading import Thread
+from typing import TYPE_CHECKING
+from unittest.mock import Mock, patch
 
 import aiohttp
 import certifi
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from yarl import URL
 
 from discord_ferry.core import http
 from discord_ferry.core.security import reset_secret_registry, sanitize_secrets
 from tests.local_cdn import ENDLESS_LIMIT, LocalCDN, local_cdn
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 _SRC = Path(__file__).resolve().parent.parent / "src" / "discord_ferry"
 
 
-def test_context_starts_from_the_default_context_with_no_ca_arguments() -> None:
+@contextmanager
+def _local_tls_server(tmp_path: Path) -> Iterator[tuple[int, Path]]:
+    now = datetime.now(UTC)
+    ca_key = rsa.generate_private_key(public_exponent=65_537, key_size=2_048)
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Ferry test CA")])
+    ca_cert = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(minutes=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=None,
+                decipher_only=None,
+            ),
+            critical=True,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    leaf_key = rsa.generate_private_key(public_exponent=65_537, key_size=2_048)
+    leaf_cert = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")]))
+        .issuer_name(ca_name)
+        .public_key(leaf_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(minutes=1))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False
+        )
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=True,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=None,
+                decipher_only=None,
+            ),
+            critical=True,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    ca_path, cert_path, key_path = (
+        tmp_path / "ca.pem",
+        tmp_path / "server.pem",
+        tmp_path / "server.key",
+    )
+    ca_path.write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
+    cert_path.write_bytes(leaf_cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        leaf_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(cert_path, key_path)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(3)
+    listener.settimeout(3)
+    port = listener.getsockname()[1]
+
+    def serve() -> None:
+        for _ in range(3):
+            try:
+                raw, _ = listener.accept()
+            except OSError:
+                return
+            raw.settimeout(3)
+            try:
+                with raw, server_context.wrap_socket(raw, server_side=True):
+                    pass
+            except OSError:
+                pass
+
+    thread = Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield port, ca_path
+    finally:
+        listener.close()
+        thread.join(timeout=4)
+        assert not thread.is_alive()
+
+
+def _connect(context: ssl.SSLContext, port: int, hostname: str) -> None:
+    with (
+        socket.create_connection(("127.0.0.1", port), timeout=2) as raw,
+        context.wrap_socket(raw, server_hostname=hostname) as tls,
+    ):
+        assert tls.version() is not None
+
+
+@pytest.fixture
+def standard_http_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(http, "sys", types.SimpleNamespace(platform="linux"), raising=False)
+
+
+def test_context_starts_from_the_default_context_with_no_ca_arguments(
+    standard_http_platform: None,
+) -> None:
     """SC-134-7, the PRIMARY replacement detector.
 
     Two wrong implementations drop the OS store and both are caught here:
@@ -58,7 +199,7 @@ def test_context_starts_from_the_default_context_with_no_ca_arguments() -> None:
         )
 
 
-def test_context_trusts_the_union_of_os_and_certifi() -> None:
+def test_context_trusts_the_union_of_os_and_certifi(standard_http_platform: None) -> None:
     """SC-134-8, corroborating only.
 
     binary_form=True is mandatory: the default dict form is unhashable and
@@ -84,7 +225,7 @@ def test_context_trusts_the_union_of_os_and_certifi() -> None:
     assert u >= d
 
 
-def test_verification_stays_strict() -> None:
+def test_verification_stays_strict(standard_http_platform: None) -> None:
     """SC-134-14."""
     http.reset_http_state()
     ctx = http._build_ssl_context()
@@ -92,7 +233,7 @@ def test_verification_stays_strict() -> None:
     assert ctx.check_hostname is True
 
 
-def test_context_is_cached() -> None:
+def test_context_is_cached(standard_http_platform: None) -> None:
     """SC-134-9."""
     http.reset_http_state()
     real = ssl.create_default_context
@@ -112,7 +253,7 @@ def test_reset_clears_the_cache() -> None:
 
 
 def test_fallback_keeps_verification_strict(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    standard_http_platform: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """SC-134-15.
 
@@ -128,6 +269,67 @@ def test_fallback_keeps_verification_strict(
     assert ctx.verify_mode is ssl.CERT_REQUIRED
     assert ctx.check_hostname is True
     assert str(missing) in caplog.text
+
+
+def test_darwin_context_uses_scoped_native_trust(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(http, "sys", types.SimpleNamespace(platform="darwin"), raising=False)
+    native = Mock(verify_mode=ssl.CERT_REQUIRED, check_hostname=True)
+    fake_truststore = types.SimpleNamespace(
+        SSLContext=Mock(return_value=native),
+        inject_into_ssl=Mock(side_effect=AssertionError("global injection is forbidden")),
+    )
+    monkeypatch.setitem(sys.modules, "truststore", fake_truststore)
+    before = ssl.SSLContext
+
+    http.reset_http_state()
+
+    assert http._get_ssl_context() is native
+    assert ssl.SSLContext is before
+    fake_truststore.SSLContext.assert_called_once_with(ssl.PROTOCOL_TLS_CLIENT)
+    native.load_default_certs.assert_called_once_with()
+    fake_truststore.inject_into_ssl.assert_not_called()
+    assert http.describe_trust()["trust-source"] == "native-union"
+    assert http.describe_trust()["ca-visible"] == "unavailable"
+
+
+def test_native_import_error_keeps_strict_standard_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(http, "sys", types.SimpleNamespace(platform="darwin"), raising=False)
+    monkeypatch.setattr(http, "_native_macos_context", Mock(side_effect=ImportError("Security")))
+    http.reset_http_state()
+
+    context = http._get_ssl_context()
+
+    assert context.verify_mode is ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    assert http.describe_trust()["trust-source"] == "native-unavailable-union"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="native trust uses macOS Security.framework")
+def test_native_context_honors_configured_root_and_keeps_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _local_tls_server(tmp_path) as (port, ca_file):
+        monkeypatch.setenv("SSL_CERT_FILE", str(ca_file))
+        http.reset_http_state()
+        _connect(http._get_ssl_context(), port, "localhost")
+        assert http.describe_trust()["trust-source"] == "native-union"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="native trust uses macOS Security.framework")
+def test_native_context_rejects_unknown_root_and_wrong_hostname(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _local_tls_server(tmp_path) as (port, ca_file):
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        http.reset_http_state()
+        with pytest.raises(ssl.SSLCertVerificationError):
+            _connect(http._get_ssl_context(), port, "localhost")
+        monkeypatch.setenv("SSL_CERT_FILE", str(ca_file))
+        http.reset_http_state()
+        with pytest.raises(ssl.SSLCertVerificationError):
+            _connect(http._get_ssl_context(), port, "wrong.invalid")
 
 
 def test_module_imports_certifi() -> None:

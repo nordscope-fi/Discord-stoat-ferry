@@ -35,6 +35,7 @@ dependencies = [
     "nicegui>=3.12.0",  # ClientConnectionTimeout landed in 3.0.0; gui.py imports it at module load
     "python-dotenv",
     "rich>=13.0",
+    "truststore>=0.10.5",
     "yarl>=1.17",
 ]
 
