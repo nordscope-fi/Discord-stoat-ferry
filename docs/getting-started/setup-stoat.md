@@ -131,6 +131,8 @@ If you are using an existing server (Option B), create a role with these permiss
 | Masquerade | Required to show each message under its original Discord author's name and avatar |
 | React | Required to add reactions |
 
+When an existing-server migration sends mapped role mentions, also grant `MentionRoles` to Ferry's assigned role in the receiving channels. Do not grant it through the server default, which applies to every member.
+
 If a non-owner migration restores channel slowmode, grant `BypassSlowmode` to Ferry's own role.
 It lets Ferry send the restored messages without waiting for each channel cooldown. Do not put it
 on the server default, because that default applies to every member.
