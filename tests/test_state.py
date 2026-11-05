@@ -192,6 +192,35 @@ def test_delivery_receipt_closed_statuses_roundtrip(tmp_path: Path, status: str)
     assert state_module.read_delivery_receipt(state, tmp_path, receipt.ref) == receipt
 
 
+@pytest.mark.parametrize("status", ["matched", "mismatch", "unavailable", "observed_only", None])
+def test_delivery_receipt_association_status_round_trips(
+    tmp_path: Path, status: str | None
+) -> None:
+    from discord_ferry import state as state_module
+
+    state, receipt, path = _delivery_fixture(tmp_path)
+    receipt.parts[0].association_status = status
+    token = state_module.write_delivery_receipt(state, tmp_path, receipt)
+    assert state_module.read_delivery_receipt(state, tmp_path, receipt.ref) == receipt
+    raw = json.loads(path.read_text())
+    assert raw["parts"][0]["association_status"] == status
+    assert token.receipt_id
+
+
+@pytest.mark.parametrize("status", [True, "unknown"])
+def test_delivery_receipt_rejects_invalid_association_status(
+    tmp_path: Path, status: object
+) -> None:
+    from discord_ferry import state as state_module
+
+    state, receipt, path = _delivery_fixture(tmp_path)
+    raw = json.loads(path.read_text())
+    raw["parts"][0]["association_status"] = status
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(StateError):
+        state_module.read_delivery_receipt(state, tmp_path, receipt.ref)
+
+
 def test_delivery_reference_is_not_scrubbed_as_text(tmp_path: Path) -> None:
     state, receipt, _ = _delivery_fixture(tmp_path)
     state.failed_messages = [FailedMessage("456", stoat_id(7), "failure", delivery_ref=receipt.ref)]

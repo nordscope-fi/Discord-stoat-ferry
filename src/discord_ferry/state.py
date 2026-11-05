@@ -18,6 +18,7 @@ from discord_ferry.errors import StateError
 
 DeliveryFamily = Literal["ordinary", "merged", "header", "separator", "forum_index"]
 PartStatus = Literal["prepared", "uncertain", "acknowledged", "confirmed_rejected"]
+AssociationStatus = Literal["matched", "mismatch", "unavailable", "observed_only"]
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class DeliveryPart:
     status: PartStatus = "prepared"
     message_id: str = ""
     autumn_ids: list[str] = field(default_factory=list)
+    association_status: AssociationStatus | None = None
 
 
 @dataclass
@@ -412,17 +414,19 @@ def _decode_delivery_receipt(value: object) -> DeliveryReceipt:
     parts: list[DeliveryPart] = []
     keys: set[str] = set()
     for index, value in enumerate(raw["parts"]):
-        part = _delivery_record(
-            value,
-            {
-                "index",
-                "key",
-                "attempt",
-                "status",
-                "message_id",
-                "autumn_ids",
-            },
-        )
+        members = {"index", "key", "attempt", "status", "message_id", "autumn_ids"}
+        if (
+            not isinstance(value, dict)
+            or not members <= set(value)
+            or set(value) - (members | {"association_status"})
+        ):
+            raise StateError("Invalid delivery evidence members")
+        part = cast("dict[str, Any]", value)
+        association_status = part.get("association_status")
+        if association_status is not None:
+            association_status = _delivery_string(
+                association_status, r"matched|mismatch|unavailable|observed_only"
+            )
         if type(part["index"]) is not int or part["index"] != index:
             raise StateError("Invalid delivery part position")
         if type(part["attempt"]) is not int or part["attempt"] < 0:
@@ -446,7 +450,13 @@ def _decode_delivery_receipt(value: object) -> DeliveryReceipt:
             raise StateError("Invalid delivery media references")
         parts.append(
             DeliveryPart(
-                index, key, part["attempt"], cast("PartStatus", status), message_id, autumn_ids
+                index,
+                key,
+                part["attempt"],
+                cast("PartStatus", status),
+                message_id,
+                autumn_ids,
+                cast("AssociationStatus | None", association_status),
             )
         )
     return DeliveryReceipt(1, namespace, service, ref, render, parts)
