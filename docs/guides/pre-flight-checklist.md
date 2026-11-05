@@ -49,6 +49,10 @@ Check that your Stoat instance can accept the files in your export:
 
 The Stoat account running Ferry needs Masquerade and ManageRole permissions at minimum, plus several others for full functionality. The minimum permission value covering all required bits is **`1,022,361,624`**. Grant them on a role assigned to the Ferry account, or run Ferry as the server owner. Never put them in the server's default permissions: Stoat applies that mask to every member, so a floor placed there becomes authority for all of them (#957). Ferry has not merged the floor into the server default since 2.41.6, and `ferry repair` on 2.41.7 or later strips it from servers migrated by older versions. The ROLES phase still restores the source Discord @everyone mask onto the server default during metadata-backed migrations; that is a faithful restore of what Discord had, not a grant of the migration floor.
 
+If a non-owner migration restores channel slowmode, grant `BypassSlowmode` to Ferry's own role.
+It lets Ferry send the restored messages without waiting for each channel cooldown. Do not put it
+on the server default, because that default applies to every member.
+
 **Why:** Without Masquerade, messages cannot display the original Discord author's name and avatar. Without ManageRole, masquerade colours will not work. See the full permission table in [Self-Hosted Tips](self-hosted-tips.md#permissions).
 
 !!! tip "Use the server owner's account"

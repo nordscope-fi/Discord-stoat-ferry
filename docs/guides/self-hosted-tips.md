@@ -139,6 +139,10 @@ If you are running Ferry with an account that is not the server owner, that acco
 | Masquerade | Showing each message under its original Discord author's name and avatar |
 | React | Adding reactions |
 
+If a non-owner migration restores channel slowmode, grant `BypassSlowmode` to Ferry's own role.
+It lets Ferry send the restored messages without waiting for each channel cooldown. Do not put it
+on the server default, because that default applies to every member.
+
 **Existing-server extras**: needed when Ferry migrates into a server it did not create (`--server-id`), so the Ferry account has to construct the structure the server owner would otherwise already own:
 
 | Permission | Required for |
