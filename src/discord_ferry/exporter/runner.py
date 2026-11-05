@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
+from discord_ferry.config import DCE_PARALLEL_MAX, DCE_PARALLEL_MIN
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import new_session, proxy_hint, resolve_proxy_or_raise, tls_hint
 from discord_ferry.core.security import safe_sanitize, strip_control
@@ -50,6 +51,14 @@ _DISK_WARN_BYTES = 5_000_000_000  # 5 GB
 # Windows console + signal flags. On non-Windows these are 0 (no-op).
 _CREATE_NEW_PROCESS_GROUP: int = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 _CREATE_NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _validated_dce_parallel(value: object) -> int:
+    if type(value) is not int or not DCE_PARALLEL_MIN <= value <= DCE_PARALLEL_MAX:
+        raise ExportError(
+            f"dce_parallel must be an integer from {DCE_PARALLEL_MIN} to {DCE_PARALLEL_MAX}"
+        )
+    return value
 
 
 # The environment the exporter child receives (issue #976). An allowlist, so a secret in
@@ -163,6 +172,7 @@ def _build_dce_command(
     and ``run_dce_export`` sets that in the child environment, so the token never
     shows in a process listing (#978).
     """
+    dce_parallel = _validated_dce_parallel(config.dce_parallel)
     command = [
         str(dce_path),
         "exportguild",
@@ -175,6 +185,8 @@ def _build_dce_command(
         "Json",
         "--include-threads",
         "All",
+        "--parallel",
+        str(dce_parallel),
         "--output",
         str(config.export_dir).replace("%", "%%"),
     ]
