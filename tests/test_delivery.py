@@ -805,7 +805,10 @@ async def test_legacy_delivery_converts_only_complete_unambiguous_multipart(
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
-async def test_delivery_receipt_corrected_rejection_mints_one_selected_attempt(tmp_path: Path):
+@pytest.mark.parametrize("permission", ["SendMessage", "MentionRoles"])
+async def test_delivery_receipt_corrected_rejection_mints_one_selected_attempt(
+    tmp_path: Path, permission: str
+):
     assert importlib.util.find_spec("discord_ferry.migrator.delivery") is not None
     module = importlib.import_module("discord_ferry.migrator.delivery")
     config = FerryConfig(
@@ -818,16 +821,18 @@ async def test_delivery_receipt_corrected_rejection_mints_one_selected_attempt(t
     ref = DeliveryRef("123", "456", stoat_id(1), "ordinary")
     keys = []
     created = []
+    sent = []
 
     async def create(url, **kwargs):
         key = kwargs["headers"]["Idempotency-Key"]
+        sent.append(kwargs["json"])
         if key in keys:
             return CallbackResult(status=409, payload={"type": "DuplicateNonce"})
         keys.append(key)
         if len(keys) == 1:
             return CallbackResult(
                 status=403,
-                payload={"type": "MissingPermission", "permission": "SendMessage"},
+                payload={"type": "MissingPermission", "permission": permission},
             )
         created.append({"_id": stoat_id(7)})
         return CallbackResult(payload=created[-1])
@@ -866,6 +871,7 @@ async def test_delivery_receipt_corrected_rejection_mints_one_selected_attempt(t
             )
     assert result.message_id == stoat_id(7)
     assert result.fully_resolved
+    assert sent[-1]["flags"] == 2
     assert len(keys) == len(set(keys)) == 2
     assert created == [{"_id": stoat_id(7)}]
     assert not state.message_map
