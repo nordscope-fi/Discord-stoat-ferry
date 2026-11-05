@@ -95,7 +95,7 @@ ferry migrate [OPTIONS]
 | `--dry-run` | | false | Run all phases without making API calls; produces synthetic IDs for validation |
 | `--max-channels INT` | | 200 | Channel limit; raise for self-hosted instances with custom limits |
 | `--max-emoji INT` | | 100 | Emoji limit; raise for self-hosted instances with custom limits |
-| `--verify-uploads` | | false | Post-upload file size verification for Autumn uploads |
+| `--verify-uploads` | | false | Compare requested media IDs with attachment and embed-media IDs on the delivered message. A mismatch keeps the delivered message and records a diagnostic. This does not compare original bytes or download, reupload, or resend files. |
 | `--reaction-mode [text\|native\|skip]` | | `text` | How reactions migrate: `text` appends a summary to the message (fast); `native` adds per-emoji reactions via API (slow, Stoat caps 20 per message); `skip` drops them |
 | `--min-thread-messages INT` | | 0 | Exclude threads with fewer messages (0 = include all). Applies to every thread strategy. |
 | `--checkpoint-interval INT` | | 50 | Save state at the first multiple of N messages reached at least 5 seconds after the last save. Lower = safer but more disk I/O. On a fast run a resume can replay more than N messages. |

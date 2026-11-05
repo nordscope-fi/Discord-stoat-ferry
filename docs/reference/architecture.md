@@ -190,7 +190,10 @@ class FerryConfig:
     invite_channel_id: (
         str | None
     )  # Discord channel ID to base the invite on (default: first eligible text channel)
-    verify_uploads: bool  # Post-upload file size verification for Autumn uploads (default False)
+    # Compare requested media IDs with attachment and embed-media IDs on the delivered message.
+    # A mismatch keeps the message and records a diagnostic. This does not compare original bytes
+    # or download, reupload, or resend files.
+    verify_uploads: bool  # Default False
     cleanup_orphans: bool  # Report unreferenced Autumn uploads after migration (report-only)
     force_unlock: bool  # Override a stale [FERRY_LOCK:...] marker on the target server
     skip_dce_verify: bool  # Skip SHA-256 verification of DCE binary downloads

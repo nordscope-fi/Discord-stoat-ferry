@@ -135,7 +135,7 @@ Before you start, confirm you have these ready:
     | `--thread-strategy` | `flatten` (default), `merge`, or `archive` |
     | `--incremental` | Delta migration, only new messages since last run |
     | `--force` | Override freshness and soft error checks |
-    | `--verify-uploads` | Post-upload file size verification |
+    | `--verify-uploads` | Compare requested media IDs with attachment and embed-media IDs on the delivered message. A mismatch keeps the delivered message and records a diagnostic. This does not compare original bytes or download, reupload, or resend files. |
     | `--cleanup-orphans` | Report unreferenced Autumn uploads |
     | `--force-unlock` | Clear stale migration lock from server |
     | `--skip-dce-verify` | Skip DCE binary SHA-256 verification |

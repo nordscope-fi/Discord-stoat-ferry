@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.2.2] - 2026-11-05
+
+### Fixed
+
+- Check attachment, sticker, and embed-media association on delivered messages. Keep confirmed deliveries and recovery-safe diagnostics without downloading, reuploading, or resending files (#1259).
+
 ## [3.2.1] - 2026-11-05
 
 ### Fixed

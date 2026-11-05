@@ -137,13 +137,13 @@ Ensure the Stoat account you are using was created at least **72 hours ago**.
 
 Ferry 2.0 adds several options. Decide which apply to your migration before you start:
 
-**Available as CLI flags and GUI Advanced Options:**
+**CLI flags. The GUI provides a subset of these options:**
 
 | Option | Purpose | When to use |
 |--------|---------|-------------|
 | `--thread-strategy flatten\|merge\|archive` | Controls how Discord threads are handled | Default is `flatten` (each thread becomes a channel). Use `merge` to append thread messages to the parent channel. Use `archive` to write local markdown files under `<output directory>/threads/<parent channel>/<thread>.md`; it posts nothing to Stoat. |
 | `--incremental` | Migrate only messages posted since the last run | Subsequent runs on a live-but-slowing server; requires a previous completed migration |
-| `--verify-uploads` | After each file upload, compare file sizes | Use when uploads may be silently corrupted (slow connections, large files) |
+| `--verify-uploads` | **CLI only.** Compare requested media IDs with attachment and embed-media IDs on the delivered message | A mismatch keeps the delivered message and records a diagnostic. This does not compare original bytes or download, reupload, or resend files. |
 | `--cleanup-orphans` | Detect and report files that were uploaded but never referenced (report-only, nothing is deleted) | Useful on self-hosted instances to find files worth cleaning up manually |
 | `--force` | Override the export freshness check (exports older than 30 days) | Only use if re-running with a known-good old export |
 | `--force-unlock` | Remove the advisory migration lock from the server | Use if a previous migration crashed and left the lock in place |
