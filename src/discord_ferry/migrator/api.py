@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 MAX_API_RETRIES = 3
 MessageRecovery = Callable[[MessageSendFailure], Awaitable[dict[str, Any]]]
+SlowmodeWait = Callable[[int], Awaitable[None]]
 _RETRYABLE_STATUSES = {429, 502, 503, 504}
 
 _CIRCUIT_THRESHOLD = 5
@@ -49,6 +50,14 @@ _CIRCUIT_PAUSE_SECONDS = 30
 
 _MAX_RETRY_DELAY_SECONDS = 60  # cap any server/body-advertised 429 retry delay
 _MIGRATION_AUDIT_HEADERS = {"X-Audit-Log-Reason": "Discord Ferry migration"}
+_UNREAD_429_BODY = object()
+
+
+@dataclass(frozen=True)
+class _SlowmodeCooldown:
+    """A validated Stoat channel slowmode wait, measured in seconds."""
+
+    seconds: int
 
 
 @dataclass
@@ -141,6 +150,7 @@ async def _api_request(
     extra_headers: dict[str, str] | None = None,
     expected_404_ok: bool = False,
     message_recovery: MessageRecovery | None = None,
+    on_slowmode_wait: SlowmodeWait | None = None,
 ) -> dict[str, Any]:
     """Make an authenticated API request with retry on 429/5xx.
 
@@ -169,19 +179,35 @@ async def _api_request(
         MigrationError: On non-retryable errors or when all retries are exhausted.
     """
     if message_recovery is not None:
-        return await _api_request_inner(
-            session,
-            method,
-            url,
-            token,
-            json_data,
-            extra_headers=extra_headers,
-            expected_404_ok=expected_404_ok,
-            message_recovery=message_recovery,
-        )
+        typed_wait_used = False
+        while True:
+            result = await _api_request_inner(
+                session,
+                method,
+                url,
+                token,
+                json_data,
+                extra_headers=extra_headers,
+                expected_404_ok=expected_404_ok,
+                message_recovery=message_recovery,
+                on_slowmode_wait=on_slowmode_wait,
+            )
+            if not isinstance(result, _SlowmodeCooldown):
+                return result
+            if typed_wait_used:
+                raise MessageSendFailure(
+                    "Message remained in slowmode after one retry",
+                    disposition="confirmed_rejected",
+                    http_status=429,
+                    error_type="InSlowmode",
+                )
+            typed_wait_used = True
+            if on_slowmode_wait is None:
+                raise AssertionError("slowmode cooldown requires its wait handler")
+            await on_slowmode_wait(result.seconds)
     if _request_semaphore is not None:
         async with _request_semaphore:
-            return await _api_request_inner(
+            result = await _api_request_inner(
                 session,
                 method,
                 url,
@@ -190,7 +216,9 @@ async def _api_request(
                 extra_headers=extra_headers,
                 expected_404_ok=expected_404_ok,
             )
-    return await _api_request_inner(
+            assert not isinstance(result, _SlowmodeCooldown)
+            return result
+    result = await _api_request_inner(
         session,
         method,
         url,
@@ -199,6 +227,8 @@ async def _api_request(
         extra_headers=extra_headers,
         expected_404_ok=expected_404_ok,
     )
+    assert not isinstance(result, _SlowmodeCooldown)
+    return result
 
 
 def _stoat_rate_delay_seconds(headers: Mapping[str, str]) -> float | None:
@@ -265,7 +295,39 @@ def _parse_ratelimit_headers(
     )
 
 
-async def _resolve_429_delay_seconds(resp: aiohttp.ClientResponse) -> float:
+async def _read_429_body(resp: aiohttp.ClientResponse) -> object | None:
+    """Read a 429 response body without letting malformed proxy content escape."""
+    try:
+        body: object = await resp.json(content_type=None)
+        return body
+    except (aiohttp.ContentTypeError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return None
+
+
+def _in_slowmode(body: object | None) -> _SlowmodeCooldown | None:
+    """Return Stoat's typed cooldown after validating its seconds value."""
+    if not isinstance(body, dict) or body.get("type") != "InSlowmode":
+        return None
+    raw = body.get("retry_after")
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        seconds = raw
+    elif isinstance(raw, float):
+        seconds = 0 if not math.isfinite(raw) or not raw.is_integer() else int(raw)
+    else:
+        seconds = 0
+    if not 1 <= seconds <= 21_600:
+        raise MessageSendFailure(
+            "InSlowmode response had an invalid retry_after value",
+            disposition="confirmed_rejected",
+            http_status=429,
+            error_type="InSlowmode",
+        )
+    return _SlowmodeCooldown(seconds)
+
+
+async def _resolve_429_delay_seconds(
+    resp: aiohttp.ClientResponse, *, body: object = _UNREAD_429_BODY
+) -> float:
     """Resolve the 429 sleep in seconds: headers → body ``retry_after`` (ms) → 1s; capped.
 
     Every Stoat-side source is millisecond-based except ``Retry-After``; see
@@ -281,10 +343,8 @@ async def _resolve_429_delay_seconds(resp: aiohttp.ClientResponse) -> float:
         # otherwise disable backoff entirely (asyncio.sleep of a negative value
         # returns immediately, so we would retry in a hot loop).
         return max(0.0, min(header_s, _MAX_RETRY_DELAY_SECONDS))
-    try:
-        body = await resp.json(content_type=None)
-    except (json.JSONDecodeError, ValueError):
-        body = None
+    if body is _UNREAD_429_BODY:
+        body = await _read_429_body(resp)
     raw = body.get("retry_after") if isinstance(body, dict) else None
     if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw):
         retry_ms = float(raw)
@@ -341,7 +401,8 @@ async def _api_request_inner(
     extra_headers: dict[str, str] | None = None,
     expected_404_ok: bool = False,
     message_recovery: MessageRecovery | None = None,
-) -> dict[str, Any]:
+    on_slowmode_wait: SlowmodeWait | None = None,
+) -> dict[str, Any] | _SlowmodeCooldown:
     """Core request logic with exponential backoff and circuit breaker."""
     global _rate_multiplier  # noqa: PLW0603
     if not credential_transport_allowed(url):
@@ -374,6 +435,7 @@ async def _api_request_inner(
     bypass_state: _BucketState | None = None
 
     for attempt in range(MAX_API_RETRIES):
+        slowmode: _SlowmodeCooldown | None = None
         # Proactive pacer: if we have seen this URL's bucket and the shadow
         # counter says the budget is exhausted, wait for the window to reset.
         # The shadow counter is decremented before the request, not after, so
@@ -483,7 +545,17 @@ async def _api_request_inner(
                     return {}
 
                 if resp.status in _RETRYABLE_STATUSES:
-                    if attempt == MAX_API_RETRIES - 1:
+                    retry_body: object = _UNREAD_429_BODY
+                    if (
+                        resp.status == 429
+                        and message_recovery is not None
+                        and on_slowmode_wait is not None
+                    ):
+                        retry_body = await _read_429_body(resp)
+                        slowmode = _in_slowmode(retry_body)
+                    if slowmode is not None:
+                        pass
+                    elif attempt == MAX_API_RETRIES - 1:
                         if message_recovery is not None and resp.status == 429:
                             raise MessageSendFailure(
                                 "Message rate limit exhausted the request retry budget",
@@ -499,11 +571,11 @@ async def _api_request_inner(
                             f"API request failed after {MAX_API_RETRIES} retries: "
                             f"{resp.status} {text}"
                         )
-                    if resp.status == 429:
+                    elif resp.status == 429:
                         # Rate-limited — NOT a circuit-breaker failure. The body parse is
                         # content-type-guarded so a non-JSON 429 can't escape into the network
                         # path and prime the breaker; honour Retry-After over the body delay.
-                        delay = await _resolve_429_delay_seconds(resp)
+                        delay = await _resolve_429_delay_seconds(resp, body=retry_body)
                         published_state = _update_pacer_state(url, resp.headers)
                         await asyncio.sleep(delay)
                         bypass_state = published_state or charged_state
@@ -526,7 +598,9 @@ async def _api_request_inner(
                         # retry burns a unit the server never accounted for.
                         if charged_state is not None and prev_remaining is not None:
                             charged_state.remaining = prev_remaining
-                    continue
+                    if slowmode is None:
+                        continue
+                    break
 
                 if resp.status == 409:
                     # A still-cached Idempotency-Key does not prove creation.
@@ -605,6 +679,8 @@ async def _api_request_inner(
             if charged_state is not None and prev_remaining is not None:
                 charged_state.remaining = prev_remaining
 
+    if slowmode is not None:
+        return slowmode
     # Unreachable, but satisfies mypy.
     raise MigrationError(f"API request failed after {MAX_API_RETRIES} retries")
 
@@ -1101,6 +1177,7 @@ async def api_send_message(
     idempotency_key: str | None = None,
     silent: bool = True,
     message_recovery: MessageRecovery | None = None,
+    on_slowmode_wait: SlowmodeWait | None = None,
 ) -> dict[str, Any]:
     """Send a message to a channel.
 
@@ -1146,6 +1223,7 @@ async def api_send_message(
             data,
             extra_headers=extra,
             message_recovery=message_recovery,
+            on_slowmode_wait=on_slowmode_wait,
         )
     return await _api_request(session, "POST", url, token, data, extra_headers=extra)
 
