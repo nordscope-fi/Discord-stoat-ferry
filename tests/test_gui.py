@@ -921,6 +921,7 @@ _EXPOSED_DEFAULTS = {
     "checkpoint_interval": 50,
     "max_concurrent_channels": 3,
     "max_concurrent_requests": 5,
+    "dce_parallel": 1,
     "skip_avatars": False,
     "validate_after": False,
     "incremental": False,
@@ -956,6 +957,31 @@ def test_coerce_advanced_settings_passes_valid_values() -> None:
     assert result["max_concurrent_requests"] == 12
     assert result["skip_avatars"] is True
     assert result["validate_after"] is True
+
+
+def test_coerce_dce_parallel_normalizes_persisted_values() -> None:
+    from discord_ferry.gui import _coerce_advanced_settings
+
+    assert _coerce_advanced_settings({"dce_parallel": 4})["dce_parallel"] == 4
+    assert _coerce_advanced_settings({"dce_parallel": 4.0})["dce_parallel"] == 4
+    for invalid in (True, None, 4.5, float("inf"), 0, 2_147_483_648):
+        assert _coerce_advanced_settings({"dce_parallel": invalid})["dce_parallel"] == 1
+
+
+def test_coerced_dce_parallel_reaches_export_config() -> None:
+    from pathlib import Path
+
+    from discord_ferry.config import FerryConfig
+    from discord_ferry.gui import _coerce_advanced_settings
+
+    config = FerryConfig(
+        export_dir=Path("x"),
+        stoat_url="https://s",
+        token="t",
+        **_coerce_advanced_settings({"dce_parallel": 4}),
+    )
+
+    assert config.dce_parallel == 4
 
 
 def test_coerce_advanced_settings_clamps_stale_out_of_range() -> None:

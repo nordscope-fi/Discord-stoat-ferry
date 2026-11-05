@@ -66,6 +66,7 @@ Below these, three labelled groups hold the tuning settings (since v2.7.0):
 |--------|---------|-------------|
 | Concurrent channels | 3 | Channels migrated in parallel. Raise only on self-hosted instances, the GUI warns if you raise it while targeting the official service. |
 | Concurrent API requests | 5 | Total concurrent API calls across all channel workers. Same self-hosted caveat. |
+| Discord export workers | 1 | DiscordChatExporter channels exported in parallel before migration. It does not change Ferry's migration channels or API requests. |
 
 **Content**
 

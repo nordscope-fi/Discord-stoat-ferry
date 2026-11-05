@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.2.0] - 2026-11-05
+
+### Added
+
+- Choose the number of Discord export workers in the CLI or GUI, with one worker as the default. Export progress now uses the final success count when channel names repeat (#1253).
+
 ## [3.1.21] - 2026-11-05
 
 ### Fixed
