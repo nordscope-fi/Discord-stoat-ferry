@@ -16,6 +16,7 @@ from aioresponses import aioresponses
 from discord_ferry import __version__
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.events import MigrationEvent
+from discord_ferry.errors import ExportError
 from discord_ferry.exporter.runner import (
     _build_dce_command,
     _check_disk_space,
@@ -128,6 +129,21 @@ class TestBuildCommand:
         assert "All" in cmd
         assert "--output" in cmd
         assert str(tmp_path / "exports") in cmd
+        assert cmd[cmd.index("--parallel") + 1] == "1"
+
+    def test_command_passes_the_selected_dce_worker_count(self, tmp_path: Path) -> None:
+        config = replace(_make_config(tmp_path), dce_parallel=3)
+
+        command = _build_dce_command(config, tmp_path / "dce")
+
+        assert command[command.index("--parallel") + 1] == "3"
+
+    @pytest.mark.parametrize("value", [False, 0, 2_147_483_648])
+    def test_command_rejects_invalid_dce_worker_count(self, tmp_path: Path, value: object) -> None:
+        config = replace(_make_config(tmp_path), dce_parallel=value)
+
+        with pytest.raises(ExportError, match="dce_parallel"):
+            _build_dce_command(config, tmp_path / "dce")
 
     def test_command_omits_media_reuse_without_a_completed_export(self, tmp_path: Path) -> None:
         cmd = _build_dce_command(_make_config(tmp_path), tmp_path / "dce")

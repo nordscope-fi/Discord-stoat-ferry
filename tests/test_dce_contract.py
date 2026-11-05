@@ -29,6 +29,7 @@ def _required_flags_from_runner() -> tuple[str, ...]:
         discord_token = "SENTINEL_TOKEN"
         discord_server_id = "SENTINEL_GUILD"
         export_dir = sentinel.export_dir  # str() call stringifies it
+        dce_parallel = 1
 
     argv = _build_dce_command(_Cfg(), sentinel.dce_path, reuse_media=True)
     # argv[0] is the dce path; argv[1] is the subcommand ("exportguild");

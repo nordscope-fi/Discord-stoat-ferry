@@ -13,6 +13,9 @@ if TYPE_CHECKING:
 
     from discord_ferry.core.security import SecureTokenStore
 
+DCE_PARALLEL_MIN = 1
+DCE_PARALLEL_MAX = 2_147_483_647
+
 
 @dataclass
 class FerryConfig:
@@ -48,6 +51,7 @@ class FerryConfig:
     invite_channel_id: str | None = None
     max_concurrent_requests: int = 5
     max_concurrent_channels: int = 3
+    dce_parallel: int = DCE_PARALLEL_MIN
 
     # Discord credentials (orchestrated mode only — never persisted to disk)
     discord_token: str | None = field(default=None, repr=False)
