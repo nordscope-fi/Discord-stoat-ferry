@@ -89,7 +89,7 @@ from discord_ferry.migrator.api import (
 )
 from discord_ferry.migrator.avatars import run_avatars
 from discord_ferry.migrator.connect import run_connect
-from discord_ferry.migrator.delivery import deliver_part
+from discord_ferry.migrator.delivery import deliver_part, slowmode_wait_handler
 from discord_ferry.migrator.emoji import (
     find_emoji_for_report,
     messages_using_emoji,
@@ -1925,6 +1925,9 @@ async def _rebuild_one_forum_index(
                 content=content,
                 masquerade={"name": "Discord Ferry"},
                 allow_rejected_retry=True,
+                on_slowmode_wait=slowmode_wait_handler(
+                    config, on_event, phase=phase, channel_name=f"{forum_name}-index"
+                ),
             )
         else:
             source_id = hashlib.sha256(forum_key.encode()).hexdigest()
@@ -1955,6 +1958,9 @@ async def _rebuild_one_forum_index(
                     allow_rejected_retry=config.incremental and not existing_msg_id,
                     recover_only=pending is not None
                     and pending.parts[0].status != "confirmed_rejected",
+                    on_slowmode_wait=slowmode_wait_handler(
+                        config, on_event, phase=phase, channel_name=f"{forum_name}-index"
+                    ),
                 )
                 if existing_msg_id and delivery.message_id != existing_msg_id:
                     raise StateError("Forum index mapping conflicts with preserved delivery")
@@ -2523,6 +2529,7 @@ async def _run_retry_failed(
                         delivery_ref=ref,
                         retry_failure=fm,
                         allow_rejected_retry=True,
+                        source_channel_name=export.channel.name,
                         source_channel_names=source_channel_names,
                         delivery_outcomes=delivery_outcomes,
                     )
@@ -2959,6 +2966,9 @@ async def _resend_channel(
             content=header,
             masquerade={"name": "Discord Ferry"},
             allow_rejected_retry=True,
+            on_slowmode_wait=slowmode_wait_handler(
+                config, on_event, phase="repair", channel_name=export.channel.name
+            ),
         )
 
     # The mark is the max over EVERY id this export holds, not over the ones
@@ -3005,6 +3015,7 @@ async def _resend_channel(
                     DeliveryRef(export.channel.id, msg.id, new_channel_id, "ordinary"),
                 ),
                 allow_rejected_retry=True,
+                source_channel_name=export.channel.name,
                 delivery_outcomes=delivery_outcomes,
             )
             if not resolved:
@@ -3133,6 +3144,7 @@ async def _repair_tail(
             export_channel_id=discord_id,
             delivery_ref=ref,
             allow_rejected_retry=True,
+            source_channel_name=export.channel.name,
             delivery_outcomes=delivery_outcomes,
         )
         if not resolved:
