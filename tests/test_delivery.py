@@ -30,6 +30,55 @@ if TYPE_CHECKING:
     from discord_ferry.parser.models import DCEExport
 
 
+async def test_slowmode_wait_handler_emits_notice_and_cancels(tmp_path) -> None:
+    """The delivery wait reports its channel and honours cancellation."""
+    from discord_ferry.migrator.delivery import slowmode_wait_handler
+
+    cancelled = asyncio.Event()
+    config = FerryConfig(
+        export_dir=tmp_path,
+        output_dir=tmp_path,
+        stoat_url="https://api.test",
+        token="test-session",
+        cancel_event=cancelled,
+    )
+    events = []
+    wait = slowmode_wait_handler(config, events.append, phase="messages", channel_name="general")
+    task = asyncio.create_task(wait(29))
+    await asyncio.sleep(0)
+    cancelled.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert events[0].phase == "messages"
+    assert events[0].channel_name == "general"
+    assert events[0].detail == {"kind": "slowmode_wait", "retry_after_seconds": 29}
+
+
+async def test_slowmode_wait_handler_cleans_children_after_parent_cancellation(tmp_path) -> None:
+    """Cancelling the parent wait must also finish its delay and cancel-event tasks."""
+    from discord_ferry.migrator.delivery import slowmode_wait_handler
+
+    config = FerryConfig(
+        export_dir=tmp_path,
+        output_dir=tmp_path,
+        stoat_url="https://api.test",
+        token="test-session",
+        cancel_event=asyncio.Event(),
+    )
+    before = set(asyncio.all_tasks())
+    task = asyncio.create_task(
+        slowmode_wait_handler(config, lambda event: None, phase="messages", channel_name="general")(
+            21_600
+        )
+    )
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+    assert [child for child in asyncio.all_tasks() - before if not child.done()] == []
+
+
 @pytest.fixture
 def publication_permission_collaborator(monkeypatch):
     """Isolate explicitly selected content, receipt and scheduling units.

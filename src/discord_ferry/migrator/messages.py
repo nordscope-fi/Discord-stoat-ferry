@@ -17,7 +17,11 @@ from discord_ferry.core.security import safe_sanitize
 from discord_ferry.errors import DeliveryUnresolvedError, PermissionSafetyError, StateError
 from discord_ferry.migrator.api import api_send_message as api_send_message
 from discord_ferry.migrator.api import get_rate_multiplier, get_session
-from discord_ferry.migrator.delivery import deliver_part, retry_delivery_context
+from discord_ferry.migrator.delivery import (
+    deliver_part,
+    retry_delivery_context,
+    slowmode_wait_handler,
+)
 from discord_ferry.migrator.sanitize import sanitize_filename, truncate_name
 from discord_ferry.migrator.verify import verify_permission_channel
 from discord_ferry.parser.dce_parser import check_cdn_url_expiry, stream_messages
@@ -770,6 +774,9 @@ async def _process_merged_message(
                 masquerade=masquerade,
                 allow_rejected_retry=allow_rejected_retry,
                 legacy_keys=legacy_keys,
+                on_slowmode_wait=slowmode_wait_handler(
+                    config, on_event, phase="messages", channel_name=export.channel.name
+                ),
             )
             latest_token = result.token
             fully_resolved = result.fully_resolved
@@ -978,6 +985,9 @@ async def _merge_threads(
                         content=separator,
                         masquerade={"name": "Discord Ferry"},
                         allow_rejected_retry=config.incremental or reconcile_failed,
+                        on_slowmode_wait=slowmode_wait_handler(
+                            config, on_event, phase="messages", channel_name=export.channel.name
+                        ),
                     )
                 except PermissionSafetyError:
                     raise
@@ -1352,6 +1362,9 @@ async def _process_single_channel(
                     content=header,
                     masquerade={"name": "Discord Ferry"},
                     allow_rejected_retry=config.incremental,
+                    on_slowmode_wait=slowmode_wait_handler(
+                        config, on_event, phase="messages", channel_name=export.channel.name
+                    ),
                 )
             except PermissionSafetyError:
                 raise
@@ -1475,6 +1488,7 @@ async def _process_single_channel(
                 on_event=on_event,
                 channel_result=result,
                 export_channel_id=export.channel.id,
+                source_channel_name=export.channel.name,
                 source_channel_names=source_channel_names,
                 retry_failure=_failures_here.get(msg.id),
             )
@@ -1598,6 +1612,7 @@ async def _process_message(
     on_event: EventCallback,
     channel_result: ChannelResult | None = None,
     export_channel_id: str = "",
+    source_channel_name: str = "",
     idempotency_salt: str = "",
     source_channel_names: dict[str, str] | None = None,
     allow_rejected_retry: bool = False,
@@ -2091,6 +2106,12 @@ async def _process_message(
                 replies=(replies if replies and is_first else None),
                 allow_rejected_retry=allow_rejected_retry or config.incremental,
                 legacy_keys=legacy_keys,
+                on_slowmode_wait=slowmode_wait_handler(
+                    config,
+                    on_event,
+                    phase="messages",
+                    channel_name=source_channel_name or export_channel_id,
+                ),
             )
         except PermissionSafetyError:
             raise
