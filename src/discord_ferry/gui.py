@@ -133,12 +133,56 @@ def _default_gui_output_dir() -> Path:
     return _gui_data_dir() / "ferry-output"
 
 
-def _configure_gui_storage() -> Path:
-    """Point NiceGUI's disk-backed user storage at Ferry's writable data directory."""
-    storage_dir = _gui_data_dir() / "nicegui"
-    storage_dir.mkdir(parents=True, exist_ok=True)
-    Storage.path = storage_dir
-    return storage_dir
+class _GuiStorageLayout(NamedTuple):
+    """The shared root, selected namespace, and signing value for one GUI launch."""
+
+    root: Path
+    selected: Path
+    secret: str
+
+
+def _is_safe_gui_storage_directory(metadata: os.stat_result) -> bool:
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISDIR(metadata.st_mode) and not (
+        getattr(metadata, "st_file_attributes", 0) & reparse
+    )
+
+
+def _ensure_gui_storage_directory(path: Path) -> Path:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        try:
+            parent_metadata = path.parent.lstat()
+        except OSError as exc:
+            raise _GuiStorageLockError("Ferry GUI storage directory is unsafe") from exc
+        if not _is_safe_gui_storage_directory(parent_metadata):
+            raise _GuiStorageLockError("Ferry GUI storage directory is unsafe") from None
+        with contextlib.suppress(FileExistsError):
+            path.mkdir(mode=0o700)
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise _GuiStorageLockError("Ferry GUI storage directory is unsafe") from exc
+    except OSError as exc:
+        raise _GuiStorageLockError("Ferry GUI storage directory is unsafe") from exc
+    if not _is_safe_gui_storage_directory(metadata):
+        raise _GuiStorageLockError("Ferry GUI storage directory is unsafe")
+    return path
+
+
+def _configure_gui_storage() -> _GuiStorageLayout:
+    """Select the owned GUI storage namespace and signing value for this launch."""
+    data_dir = _ensure_gui_storage_directory(_gui_data_dir())
+    root = _ensure_gui_storage_directory(data_dir / "nicegui")
+    if "FERRY_STORAGE_SECRET" in os.environ:
+        selected = root
+        secret = os.environ["FERRY_STORAGE_SECRET"]
+    else:
+        selected = _ensure_gui_storage_directory(root / "default-session")
+        secret = secrets.token_hex(32)
+    Storage.path = selected
+    return _GuiStorageLayout(root=root, selected=selected, secret=secret)
 
 
 class _GuiStorageLockError(RuntimeError):
@@ -192,6 +236,98 @@ def _ensure_gui_port_available() -> None:
 
 def _warn_gui_record(record_id: UUID, category: str) -> None:
     logger.warning("GUI storage record %s skipped: %s", record_id, category)
+
+
+def _default_session_record_id(name: str) -> UUID | None:
+    suffix = ".json.tmp" if name.endswith(".json.tmp") else ".json"
+    if not name.startswith("storage-user-") or not name.endswith(suffix):
+        return None
+    try:
+        record_id = UUID(name.removeprefix("storage-user-").removesuffix(suffix))
+    except ValueError:
+        return None
+    if name not in {f"storage-user-{record_id}.json", f"storage-user-{record_id}.json.tmp"}:
+        return None
+    return record_id
+
+
+def _record_identity(metadata: os.stat_result) -> tuple[int, int, int, int] | None:
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        return None
+    return metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink
+
+
+def _cleanup_default_gui_storage(default_dir: Path) -> None:
+    """Remove only stale, canonical NiceGUI records from Ferry's owned namespace."""
+    try:
+        directory_metadata = default_dir.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.warning("GUI default-session cleanup skipped: directory")
+        return
+    if not _is_safe_gui_storage_directory(directory_metadata):
+        logger.warning("GUI default-session cleanup skipped: directory")
+        return
+    if os.unlink in os.supports_dir_fd and os.stat in os.supports_dir_fd:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(default_dir, flags)
+        except OSError:
+            logger.warning("GUI default-session cleanup skipped: directory")
+            return
+        try:
+            if not _is_safe_gui_storage_directory(os.fstat(descriptor)):
+                logger.warning("GUI default-session cleanup skipped: directory")
+                return
+            try:
+                names = os.listdir(descriptor)
+            except OSError:
+                logger.warning("GUI default-session cleanup skipped: directory")
+                return
+            for name in names:
+                record_id = _default_session_record_id(name)
+                if record_id is None:
+                    continue
+                try:
+                    first = _record_identity(
+                        os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    )
+                    if first is None:
+                        _warn_gui_record(record_id, "metadata")
+                        continue
+                    current = _record_identity(
+                        os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    )
+                    if current != first:
+                        _warn_gui_record(record_id, "changed")
+                        continue
+                    os.unlink(name, dir_fd=descriptor)
+                except OSError:
+                    _warn_gui_record(record_id, "remove")
+        finally:
+            os.close(descriptor)
+        return
+    try:
+        candidates = list(default_dir.iterdir())
+    except OSError:
+        logger.warning("GUI default-session cleanup skipped: directory")
+        return
+    for candidate in candidates:
+        record_id = _default_session_record_id(candidate.name)
+        if record_id is None:
+            continue
+        try:
+            first = _record_identity(candidate.lstat())
+            if first is None or not _is_safe_gui_storage_directory(default_dir.lstat()):
+                _warn_gui_record(record_id, "metadata")
+                continue
+            if _record_identity(candidate.lstat()) != first:
+                _warn_gui_record(record_id, "changed")
+                continue
+            candidate.unlink()
+        except OSError:
+            _warn_gui_record(record_id, "remove")
 
 
 def _iter_historical_gui_records(storage_dir: Path) -> Iterable[tuple[UUID, Path]]:
@@ -2524,9 +2660,11 @@ def _install_host_guard() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _run_gui() -> None:
+def _run_gui(secret: str | None = None) -> None:
     """Start the UI and guarantee native cleanup and scoped launcher restoration."""
     global _active_native_launcher
+    if secret is None:
+        secret = os.environ.get("FERRY_STORAGE_SECRET", secrets.token_hex(32))
     native_requested = _native_enabled()
     _install_host_guard()
     fallback: BrowserFallback | None = None
@@ -2557,7 +2695,7 @@ def _run_gui() -> None:
                 native=native,
                 show=show,
                 reload=False,
-                storage_secret=os.environ.get("FERRY_STORAGE_SECRET", secrets.token_hex(32)),
+                storage_secret=secret,
                 reconnect_timeout=10.0,
                 timeout_graceful_shutdown=1,
                 proxy_headers=False,
@@ -2598,13 +2736,14 @@ def main() -> None:
     # spawn child never reaches main() at all, so the ordering is merely inert
     # there, not wrong.)
     configure_logging()
-    storage_dir = _configure_gui_storage()
-    lock = _acquire_gui_storage_lock(storage_dir)
+    layout = _configure_gui_storage()
+    lock = _acquire_gui_storage_lock(layout.root)
 
     try:
         _ensure_gui_port_available()
-        _scrub_historical_gui_records(storage_dir)
-        _run_gui()
+        _scrub_historical_gui_records(layout.root)
+        _cleanup_default_gui_storage(layout.root / "default-session")
+        _run_gui(layout.secret)
     except KeyboardInterrupt:
         # Two routine sources, not just a stray Ctrl-C: uvicorn re-raises a captured
         # SIGINT after restoring the default handler, and NiceGUI's check_shutdown thread

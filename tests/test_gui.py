@@ -410,19 +410,58 @@ def test_default_gui_output_dir_uses_the_user_data_directory(
     assert gui._default_gui_output_dir() == tmp_path / ".discord-ferry" / "ferry-output"
 
 
-def test_configure_gui_storage_uses_the_user_data_directory(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("secret", "selected_child"),
+    [
+        (None, "default-session"),
+        ("explicit", None),
+        ("", None),
+        ("   ", None),
+    ],
+)
+def test_configure_gui_storage_selects_default_session_only_without_secret(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, secret: str | None, selected_child: str | None
 ) -> None:
-    """NiceGUI's disk-backed user store must not resolve from the launch directory (#1195)."""
+    """Only an absent secret gets a disposable GUI storage namespace (#1294)."""
     from nicegui.storage import Storage
 
     from discord_ferry import gui
 
     monkeypatch.setattr(gui.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(Storage, "path", Storage.path)
+    if secret is None:
+        monkeypatch.delenv("FERRY_STORAGE_SECRET", raising=False)
+    else:
+        monkeypatch.setenv("FERRY_STORAGE_SECRET", secret)
 
-    assert gui._configure_gui_storage() == tmp_path / ".discord-ferry" / "nicegui"
-    assert Storage.path == tmp_path / ".discord-ferry" / "nicegui"
+    layout = gui._configure_gui_storage()
+
+    assert layout.root == tmp_path / ".discord-ferry" / "nicegui"
+    assert layout.selected == (
+        layout.root / selected_child if selected_child is not None else layout.root
+    )
+    assert Storage.path == layout.selected
+    if secret is not None:
+        assert layout.secret == secret
+
+
+def test_configure_gui_storage_rejects_a_linked_ferry_data_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from discord_ferry import gui
+
+    target = tmp_path / "outside"
+    target.mkdir()
+    linked_data_dir = tmp_path / ".discord-ferry"
+    try:
+        linked_data_dir.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("symbolic links unavailable on this test host")
+    monkeypatch.setattr(gui.Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("FERRY_STORAGE_SECRET", raising=False)
+
+    with pytest.raises(gui._GuiStorageLockError, match="unsafe"):
+        gui._configure_gui_storage()
 
 
 def test_gui_storage_lock_rejects_a_second_holder(tmp_path: Path) -> None:
@@ -444,10 +483,12 @@ def test_main_holds_storage_lock_until_run_gui_returns(
     monkeypatch.setattr(gui.multiprocessing, "freeze_support", lambda: None)
     monkeypatch.setattr(gui.entry, "should_run_cli", lambda argv: False)
     monkeypatch.setattr(gui, "configure_logging", lambda: None)
-    monkeypatch.setattr(gui, "_configure_gui_storage", lambda: tmp_path)
+    layout = gui._GuiStorageLayout(root=tmp_path, selected=tmp_path, secret="test-secret")
+    monkeypatch.setattr(gui, "_configure_gui_storage", lambda: layout)
     monkeypatch.setattr(gui, "_ensure_gui_port_available", lambda: None, raising=False)
+    monkeypatch.setattr(gui, "_cleanup_default_gui_storage", lambda _path: None, raising=False)
 
-    def run_gui() -> None:
+    def run_gui(_secret: str | None = None) -> None:
         with pytest.raises(gui._GuiStorageLockError):
             gui._acquire_gui_storage_lock(tmp_path)
 
@@ -523,6 +564,110 @@ def test_warn_gui_record_uses_only_uuid_and_fixed_category(
     assert "outside-secret" not in caplog.text
     assert "storage-user-not-a-uuid.json" not in caplog.text
     assert "synthetic exception" not in caplog.text
+
+
+def test_default_session_cleanup_removes_only_owned_regular_records(tmp_path: Path) -> None:
+    from discord_ferry import gui
+
+    default_dir = tmp_path / "default-session"
+    default_dir.mkdir()
+    record_id = UUID("12345678-1234-1234-1234-123456789abc")
+    record = default_dir / f"storage-user-{record_id}.json"
+    temporary = record.with_name(record.name + ".tmp")
+    record.write_text('{"token": "residue"}', encoding="utf-8")
+    temporary.write_text('{"token": "residue"}', encoding="utf-8")
+    unrelated = default_dir / "storage-general.json"
+    unrelated.write_text("{}", encoding="utf-8")
+    malformed = default_dir / "storage-user-not-a-uuid.json"
+    malformed.write_text("{}", encoding="utf-8")
+
+    gui._cleanup_default_gui_storage(default_dir)
+
+    assert not record.exists()
+    assert not temporary.exists()
+    assert unrelated.exists()
+    assert malformed.exists()
+
+
+def test_default_session_cleanup_preserves_linked_records(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from discord_ferry import gui
+
+    default_dir = tmp_path / "default-session"
+    default_dir.mkdir()
+    record_id = UUID("abcdefab-cdef-cdef-cdef-abcdefabcdef")
+    record = default_dir / f"storage-user-{record_id}.json"
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"token": "outside"}', encoding="utf-8")
+    try:
+        record.symlink_to(outside)
+    except OSError:
+        pytest.skip("symbolic links unavailable on this test host")
+
+    with caplog.at_level(logging.WARNING, logger=gui.__name__):
+        gui._cleanup_default_gui_storage(default_dir)
+
+    assert record.is_symlink()
+    assert outside.read_text(encoding="utf-8") == '{"token": "outside"}'
+    assert "outside" not in caplog.text
+
+
+def test_default_session_cleanup_handles_descriptor_enumeration_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from discord_ferry import gui
+
+    if not (gui.os.unlink in gui.os.supports_dir_fd and gui.os.stat in gui.os.supports_dir_fd):
+        pytest.skip("descriptor-relative cleanup is unavailable on this platform")
+
+    default_dir = tmp_path / "default-session"
+    default_dir.mkdir()
+    record = default_dir / "storage-user-12345678-1234-1234-1234-123456789abc.json"
+    record.write_text('{"token": "descriptor-secret"}', encoding="utf-8")
+    closed: list[int] = []
+    original_close = gui.os.close
+
+    def close(descriptor: int) -> None:
+        closed.append(descriptor)
+        original_close(descriptor)
+
+    monkeypatch.setattr(
+        gui.os, "listdir", lambda _descriptor: (_ for _ in ()).throw(OSError("probe"))
+    )
+    monkeypatch.setattr(gui.os, "close", close)
+    with caplog.at_level(logging.WARNING, logger=gui.__name__):
+        gui._cleanup_default_gui_storage(default_dir)
+
+    assert record.exists()
+    assert closed
+    assert "descriptor-secret" not in caplog.text
+    assert "probe" not in caplog.text
+    assert "directory" in caplog.text
+
+
+def test_default_session_cleanup_handles_fallback_enumeration_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from discord_ferry import gui
+
+    default_dir = tmp_path / "default-session"
+    default_dir.mkdir()
+    record = default_dir / "storage-user-12345678-1234-1234-1234-123456789abc.json"
+    record.write_text('{"token": "fallback-secret"}', encoding="utf-8")
+
+    def fail_iterdir(_path: Path) -> object:
+        raise OSError("probe")
+
+    monkeypatch.setattr(gui.os, "supports_dir_fd", set())
+    monkeypatch.setattr(type(default_dir), "iterdir", fail_iterdir)
+    with caplog.at_level(logging.WARNING, logger=gui.__name__):
+        gui._cleanup_default_gui_storage(default_dir)
+
+    assert record.exists()
+    assert "fallback-secret" not in caplog.text
+    assert "probe" not in caplog.text
+    assert "directory" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -642,13 +787,15 @@ def test_main_port_conflict_stops_before_scrub(
     monkeypatch.setattr(gui.multiprocessing, "freeze_support", lambda: None)
     monkeypatch.setattr(gui.entry, "should_run_cli", lambda argv: False)
     monkeypatch.setattr(gui, "configure_logging", lambda: None)
-    monkeypatch.setattr(gui, "_configure_gui_storage", lambda: tmp_path)
+    layout = gui._GuiStorageLayout(root=tmp_path, selected=tmp_path, secret="test-secret")
+    monkeypatch.setattr(gui, "_configure_gui_storage", lambda: layout)
     monkeypatch.setattr(
         gui,
         "_ensure_gui_port_available",
         lambda: (_ for _ in ()).throw(gui._GuiStorageLockError("port")),
     )
     monkeypatch.setattr(gui, "_scrub_historical_gui_records", pytest.fail)
+    monkeypatch.setattr(gui, "_cleanup_default_gui_storage", pytest.fail, raising=False)
     with pytest.raises(gui._GuiStorageLockError, match="port"):
         gui.main()
 
@@ -661,8 +808,10 @@ def test_main_lock_conflict_stops_before_scrub_or_run_gui(
     monkeypatch.setattr(gui.multiprocessing, "freeze_support", lambda: None)
     monkeypatch.setattr(gui.entry, "should_run_cli", lambda argv: False)
     monkeypatch.setattr(gui, "configure_logging", lambda: None)
-    monkeypatch.setattr(gui, "_configure_gui_storage", lambda: tmp_path)
+    layout = gui._GuiStorageLayout(root=tmp_path, selected=tmp_path, secret="test-secret")
+    monkeypatch.setattr(gui, "_configure_gui_storage", lambda: layout)
     monkeypatch.setattr(gui, "_scrub_historical_gui_records", pytest.fail)
+    monkeypatch.setattr(gui, "_cleanup_default_gui_storage", pytest.fail, raising=False)
     monkeypatch.setattr(gui, "_run_gui", pytest.fail)
     first = gui._acquire_gui_storage_lock(tmp_path)
     try:
