@@ -2456,6 +2456,7 @@ _EXPOSED_FIELDS = (
     "checkpoint_interval",
     "max_concurrent_channels",
     "max_concurrent_requests",
+    "dce_parallel",
     "skip_avatars",
     "validate_after",
 )
@@ -2479,6 +2480,8 @@ def test_migrate_exposed_settings_land_on_config(runner: CliRunner) -> None:
                 "6",
                 "--max-concurrent-requests",
                 "12",
+                "--dce-parallel",
+                "3",
                 "--skip-avatars",
                 "--validate-after",
             ],
@@ -2491,6 +2494,8 @@ def test_migrate_exposed_settings_land_on_config(runner: CliRunner) -> None:
     assert config.checkpoint_interval == 100
     assert config.max_concurrent_channels == 6
     assert config.max_concurrent_requests == 12
+    assert config.dce_parallel == 3
+    assert config.skip_export is True
     assert config.skip_avatars is True
     assert config.validate_after is True
 
@@ -2519,6 +2524,7 @@ def test_migrate_help_documents_exposed_settings(runner: CliRunner) -> None:
         "--checkpoint-interval",
         "--max-concurrent-channels",
         "--max-concurrent-requests",
+        "--dce-parallel",
         "--skip-avatars",
         "--validate-after",
     ):
@@ -2537,10 +2543,26 @@ def test_other_commands_unchanged_by_exposed_settings(runner: CliRunner) -> None
             "--max-concurrent-channels",
             "--skip-avatars",
             "--validate-after",
+            "--dce-parallel",
         ):
             assert flag not in result.output, f"{flag} leaked into {command}"
     rollback_help = runner.invoke(main, ["rollback", "--help"]).output
     assert "--max-concurrent-requests" in rollback_help  # its own, unrelated flag
+
+
+@pytest.mark.parametrize("value", ["0", "2147483648"])
+def test_migrate_rejects_dce_parallel_outside_dce_range(runner: CliRunner, value: str) -> None:
+    mock_engine = _make_mock_engine()
+
+    with patch("discord_ferry.cli.run_migration", mock_engine):
+        result = runner.invoke(
+            main,
+            [*_BASE_MIGRATE_ARGS, "--dce-parallel", value],
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code != 0
+    mock_engine.assert_not_called()
 
 
 def test_migrate_rejects_out_of_range_settings(runner: CliRunner) -> None:

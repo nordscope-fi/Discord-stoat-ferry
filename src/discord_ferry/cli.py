@@ -22,7 +22,7 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 from rich.table import Table
 
 from discord_ferry import __version__
-from discord_ferry.config import FerryConfig
+from discord_ferry.config import DCE_PARALLEL_MAX, DCE_PARALLEL_MIN, FerryConfig
 from discord_ferry.core.engine import (
     PHASE_ORDER,
     run_migration,
@@ -596,6 +596,13 @@ _common_options = [
         help="Save state every N messages (lower = safer, more disk I/O)",
     ),
     click.option(
+        "--dce-parallel",
+        type=click.IntRange(min=DCE_PARALLEL_MIN, max=DCE_PARALLEL_MAX),
+        default=DCE_PARALLEL_MIN,
+        show_default=True,
+        help="Discord channels exported in parallel before migration",
+    ),
+    click.option(
         "--max-concurrent-channels",
         type=click.IntRange(min=1),
         default=3,
@@ -717,6 +724,7 @@ def _build_config(
         checkpoint_interval=kwargs.get("checkpoint_interval", 50),
         max_concurrent_channels=kwargs.get("max_concurrent_channels", 3),
         max_concurrent_requests=kwargs.get("max_concurrent_requests", 5),
+        dce_parallel=kwargs.get("dce_parallel", DCE_PARALLEL_MIN),
         skip_avatars=kwargs.get("skip_avatars", False),
         validate_after=kwargs.get("validate_after", False),
     )
