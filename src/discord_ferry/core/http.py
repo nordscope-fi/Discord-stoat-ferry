@@ -17,11 +17,12 @@ from __future__ import annotations
 import logging
 import os
 import ssl
+import sys
 import urllib.request
 from dataclasses import dataclass, field
 from ipaddress import ip_address, ip_network
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import aiohttp
 import certifi
@@ -53,6 +54,33 @@ _ssl_context: ssl.SSLContext | None = None
 # any "visible >= baseline" comparison is trivially true and would report a
 # healthy union while the bundle silently failed to load.
 _trust_source: str = "unbuilt"
+_native_context_active = False
+
+
+def _load_certifi_roots(context: ssl.SSLContext) -> bool:
+    """Add Ferry's bundled certificate roots without weakening verification."""
+    bundle = "<unresolved>"
+    try:
+        bundle = certifi.where()
+        context.load_verify_locations(cafile=bundle)
+    except OSError:
+        logger.warning(
+            "could not load the bundled CA roots from %s; "
+            "keeping strict verification without the bundled roots",
+            bundle,
+            exc_info=True,
+        )
+        return False
+    return True
+
+
+def _native_macos_context() -> ssl.SSLContext:
+    """Build Ferry's scoped native macOS context without changing global SSL."""
+    import truststore
+
+    context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_default_certs()
+    return cast("ssl.SSLContext", context)
 
 
 def _build_ssl_context() -> ssl.SSLContext:
@@ -64,25 +92,34 @@ def _build_ssl_context() -> ssl.SSLContext:
     would silently be certifi INSTEAD of the OS store, breaking every machine
     that depends on a corporate root.
     """
-    global _trust_source  # noqa: PLW0603
-    context = ssl.create_default_context()
-    bundle = "<unresolved>"
-    try:
-        bundle = certifi.where()
-        context.load_verify_locations(cafile=bundle)
-        _trust_source = "union"
-    except OSError:
-        # ssl.SSLError subclasses OSError, so catching OSError alone covers
-        # both a missing/unreadable bundle path and a malformed PEM file.
-        _trust_source = "fallback"
-        # Degrade to exactly today's behaviour, never to unverified transport.
-        # A missing bundle is a packaging slip; it must not cost all networking.
-        logger.warning(
-            "could not load the bundled CA roots from %s; "
-            "falling back to the operating system trust store only",
-            bundle,
-            exc_info=True,
+    global _native_context_active, _trust_source  # noqa: PLW0603
+    _native_context_active = False
+    native_unavailable = False
+    if sys.platform == "darwin":
+        try:
+            context = _native_macos_context()
+        except ImportError:
+            native_unavailable = True
+            context = ssl.create_default_context()
+            logger.warning(
+                "could not initialize native macOS trust; "
+                "using the strict standard-library context",
+                exc_info=True,
+            )
+        else:
+            _native_context_active = True
+    else:
+        context = ssl.create_default_context()
+
+    bundle_loaded = _load_certifi_roots(context)
+    if _native_context_active:
+        _trust_source = "native-union" if bundle_loaded else "native"
+    elif native_unavailable:
+        _trust_source = (
+            "native-unavailable-union" if bundle_loaded else "native-unavailable-fallback"
         )
+    else:
+        _trust_source = "union" if bundle_loaded else "fallback"
     return context
 
 
@@ -119,9 +156,10 @@ def reset_http_state() -> None:
     environment reading, so clearing a subset leaves the module answering from
     two different worlds.
     """
-    global _ssl_context, _trust_source, _proxy_scan, _proxy_notices  # noqa: PLW0603
+    global _native_context_active, _ssl_context, _trust_source, _proxy_scan, _proxy_notices  # noqa: PLW0603
     _ssl_context = None
     _trust_source = "unbuilt"
+    _native_context_active = False
     _proxy_scan = None
     _bypass_memo.clear()
     _proxy_notices = ()
@@ -151,7 +189,11 @@ def describe_trust() -> dict[str, str]:
         # but malformed bundle still raises, and a count comparison would then
         # report a healthy union while trust had silently degraded.
         "trust-source": _trust_source,
-        "ca-visible": str(len(context.get_ca_certs(binary_form=True))),
+        "ca-visible": (
+            "unavailable"
+            if _native_context_active
+            else str(len(context.get_ca_certs(binary_form=True)))
+        ),
     }
 
 

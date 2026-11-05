@@ -2731,13 +2731,15 @@ def test_tls_check_reports_the_branch_actually_taken(tmp_path: Path) -> None:
     observe a fresh build, on top of the autouse fixture that only resets
     between test FUNCTIONS.
     """
-    assert "trust-source: union" in CliRunner().invoke(main, ["tls-check"]).output
+    expected_loaded = "native-union" if sys.platform == "darwin" else "union"
+    expected_missing_bundle = "native" if sys.platform == "darwin" else "fallback"
+    assert f"trust-source: {expected_loaded}" in CliRunner().invoke(main, ["tls-check"]).output
 
     missing = tmp_path / "nope.pem"
     reset_http_state()
     with patch.object(certifi, "where", return_value=str(missing)):
         out = CliRunner().invoke(main, ["tls-check"]).output
-    assert "trust-source: fallback" in out
+    assert f"trust-source: {expected_missing_bundle}" in out
 
     # A missing bundle only proves certifi.where() failed to resolve a path.
     # The check this command exists for is a bundle that RESOLVES and READS
@@ -2750,7 +2752,7 @@ def test_tls_check_reports_the_branch_actually_taken(tmp_path: Path) -> None:
     with patch.object(certifi, "where", return_value=str(bad)):
         out = CliRunner().invoke(main, ["tls-check"]).output
     assert "ca-bundle-readable: true" in out  # the file is fine
-    assert "trust-source: fallback" in out  # the trust is not
+    assert f"trust-source: {expected_missing_bundle}" in out  # the bundled roots did not load
 
 
 # ---------------------------------------------------------------------------
