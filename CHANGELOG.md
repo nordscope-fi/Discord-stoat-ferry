@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.1.21] - 2026-11-05
+
+### Fixed
+
+- Wait once for Stoat channel slowmode before retrying message delivery, preserving the delivery identity and showing a cancellable notice (#1188).
+
 ## [3.1.20] - 2026-11-05
 
 ### Fixed
