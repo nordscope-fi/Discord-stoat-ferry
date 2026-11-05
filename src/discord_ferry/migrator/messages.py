@@ -63,7 +63,7 @@ if TYPE_CHECKING:
         DCEMessage,
         DCEReaction,
     )
-    from discord_ferry.state import MigrationState
+    from discord_ferry.state import AssociationStatus, MigrationState
 
 _THREAD_STRATEGIES = frozenset({"flatten", "merge", "archive"})
 
@@ -71,6 +71,27 @@ _THREAD_STRATEGIES = frozenset({"flatten", "merge", "archive"})
 logger = logging.getLogger(__name__)
 
 _VALID_REACTION_MODES = frozenset({"text", "native", "skip"})
+
+_ASSOCIATION_WARNINGS = {
+    "mismatch": "Delivered message media differs from the requested media.",
+    "unavailable": "Delivered message media could not be verified.",
+    "observed_only": "Delivered message media was observed without original request evidence.",
+}
+
+
+def _append_association_warning(
+    warnings: list[dict[str, str]], config: FerryConfig, status: AssociationStatus | None
+) -> None:
+    if not config.verify_uploads or status is None or status not in _ASSOCIATION_WARNINGS:
+        return
+    warnings.append(
+        {
+            "phase": "messages",
+            "type": f"upload_association_{status}",
+            "message": _ASSOCIATION_WARNINGS[status],
+        }
+    )
+
 
 # Edited-message marker appended by _build_content; shared with the empty-message
 # guard so the two stay byte-identical. Changing this changes migrated content.
@@ -781,6 +802,9 @@ async def _process_merged_message(
             latest_token = result.token
             fully_resolved = result.fully_resolved
             acknowledged_parts += 1
+            if config.verify_uploads:
+                state.referenced_autumn_ids.update(result.autumn_ids)
+                _append_association_warning(state.warnings, config, result.association_status)
             if part_index == 0:
                 first_id = result.message_id
         except PermissionSafetyError:
@@ -1772,7 +1796,6 @@ async def _process_message(
                 config.token,
                 state.upload_cache,
                 config.upload_delay,
-                verify_size=config.verify_uploads,
                 skip_cache=True,
             )
             autumn_ids.append(sticker_id)
@@ -1862,7 +1885,6 @@ async def _process_message(
                         config.token,
                         state.upload_cache,
                         config.upload_delay,
-                        verify_size=config.verify_uploads,
                         skip_cache=True,
                     )
                     flat["media"] = media_id
@@ -2162,6 +2184,7 @@ async def _process_message(
         if is_first:
             stoat_msg_id = part_stoat_id
             confirmed_autumn_ids = result.autumn_ids
+            _append_association_warning(acc_warnings, config, result.association_status)
 
     # Step 8a: Commit delivered state and queue pins/reactions.
     #
@@ -2591,7 +2614,6 @@ async def _upload_attachments(
                 state.upload_cache,
                 config.upload_delay,
                 filename=att.file_name,
-                verify_size=config.verify_uploads,
                 skip_cache=True,
             )
             autumn_ids.append(autumn_id)

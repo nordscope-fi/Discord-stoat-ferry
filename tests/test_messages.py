@@ -599,6 +599,199 @@ def _make_message(
     return DCEMessage(**defaults)
 
 
+@pytest.mark.parametrize(
+    ("status", "observed_ids", "expected_warning"),
+    [
+        ("matched", ("observed",), None),
+        (
+            "mismatch",
+            ("observed",),
+            {
+                "phase": "messages",
+                "type": "upload_association_mismatch",
+                "message": "Delivered message media differs from the requested media.",
+            },
+        ),
+        (
+            "unavailable",
+            (),
+            {
+                "phase": "messages",
+                "type": "upload_association_unavailable",
+                "message": "Delivered message media could not be verified.",
+            },
+        ),
+        (
+            "observed_only",
+            ("observed",),
+            {
+                "phase": "messages",
+                "type": "upload_association_observed_only",
+                "message": (
+                    "Delivered message media was observed without original request evidence."
+                ),
+            },
+        ),
+    ],
+)
+async def test_message_delivery_consumes_association_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    observed_ids: tuple[str, ...],
+    expected_warning: dict[str, str] | None,
+) -> None:
+    from discord_ferry.state import DeliveryToken
+
+    config = _make_config(tmp_path, verify_uploads=True)
+    state = _make_state(referenced_autumn_ids={"preexisting"})
+    message = _make_message(id="association-message", content="body")
+
+    async def deliver_outcome(**_kwargs: Any) -> delivery_module.DeliveryResult:
+        return delivery_module.DeliveryResult(
+            _valid_id("association-result"),
+            observed_ids,
+            DeliveryToken("a" * 64, "b" * 64),
+            True,
+            False,
+            status,
+        )
+
+    monkeypatch.setattr(messages_module, "deliver_part", deliver_outcome)
+    async with aiohttp.ClientSession() as session:
+        delivered = await _process_message(
+            msg=message,
+            stoat_channel_id=_valid_id("destination"),
+            config=config,
+            state=state,
+            session=session,
+            on_event=lambda event: None,
+            export_channel_id="ch1",
+        )
+    assert delivered is True
+    assert state.message_map[message.id] == _valid_id("association-result")
+    assert state.referenced_autumn_ids == {"preexisting", *observed_ids}
+    association_warnings = [
+        warning for warning in state.warnings if warning["type"].startswith("upload_association_")
+    ]
+    assert association_warnings == ([] if expected_warning is None else [expected_warning])
+
+
+@pytest.mark.parametrize("verify_uploads", [False, True])
+async def test_merged_delivery_consumes_observed_association_media(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verify_uploads: bool
+) -> None:
+    from discord_ferry.state import DeliveryToken
+
+    config = _make_config(tmp_path, verify_uploads=verify_uploads)
+    state = _make_state(referenced_autumn_ids={"preexisting"})
+    export = _make_export(messages=[])
+    message = _make_message(id="merged-1", content="body")
+
+    async def deliver_observed(**_kwargs: Any) -> delivery_module.DeliveryResult:
+        return delivery_module.DeliveryResult(
+            _valid_id("merged"),
+            ("observed_autumn",),
+            DeliveryToken("a" * 64, "b" * 64),
+            True,
+            True,
+            "observed_only",
+        )
+
+    monkeypatch.setattr(messages_module, "deliver_part", deliver_observed)
+    async with aiohttp.ClientSession() as session:
+        delivered = await messages_module._process_merged_message(
+            export=export,
+            msg=message,
+            stoat_channel_id=_valid_id("destination"),
+            config=config,
+            state=state,
+            session=session,
+            on_event=lambda event: None,
+        )
+    assert delivered is True
+    expected_references = {"preexisting", "observed_autumn"} if verify_uploads else {"preexisting"}
+    assert state.referenced_autumn_ids == expected_references
+    association_warnings = [
+        warning for warning in state.warnings if warning["type"].startswith("upload_association_")
+    ]
+    if verify_uploads:
+        assert association_warnings == [
+            {
+                "phase": "messages",
+                "type": "upload_association_observed_only",
+                "message": (
+                    "Delivered message media was observed without original request evidence."
+                ),
+            }
+        ]
+    else:
+        assert association_warnings == []
+
+
+@pytest.mark.usefixtures("publication_permission_collaborator")
+async def test_association_warning_regenerates_after_receipt_only_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry.state import load_state
+
+    config = _make_config(tmp_path, verify_uploads=True)
+    message = _make_message(id="crash-warning", content="body")
+    destination = _valid_id("destination")
+    state = _make_state(channel_map={"123": destination})
+    original_append = messages_module._append_association_warning
+
+    def crash_after_receipt(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("warning persistence interrupted")
+
+    monkeypatch.setattr(messages_module, "_append_association_warning", crash_after_receipt)
+    with aioresponses() as http:
+        http.post(
+            f"{BASE_URL}/channels/{destination}/messages",
+            payload={"_id": _valid_id("delivered"), "attachments": [{"_id": "observed"}]},
+        )
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(RuntimeError, match="warning persistence interrupted"):
+                await _process_message(
+                    msg=message,
+                    stoat_channel_id=destination,
+                    config=config,
+                    state=state,
+                    session=session,
+                    on_event=lambda event: None,
+                    export_channel_id="123",
+                )
+        assert [method for method, _ in http.requests] == ["POST"]
+
+    monkeypatch.setattr(messages_module, "_append_association_warning", original_append)
+    restarted = load_state(tmp_path)
+    with aioresponses() as http:
+        async with aiohttp.ClientSession() as session:
+            await _process_message(
+                msg=message,
+                stoat_channel_id=destination,
+                config=config,
+                state=restarted,
+                session=session,
+                on_event=lambda event: None,
+                export_channel_id="123",
+            )
+        assert not http.requests
+    assert restarted.message_map[message.id] == _valid_id("delivered")
+    assert restarted.referenced_autumn_ids == {"observed"}
+    assert [
+        warning
+        for warning in restarted.warnings
+        if warning["type"] == "upload_association_mismatch"
+    ] == [
+        {
+            "phase": "messages",
+            "type": "upload_association_mismatch",
+            "message": "Delivered message media differs from the requested media.",
+        }
+    ]
+
+
 def _capture_sends(sent: list[dict[str, Any]]) -> Any:
     """Patch target for api_send_message: record kwargs, return a fake id."""
 
@@ -2472,6 +2665,7 @@ async def test_successful_send_marks_referenced(tmp_path: Path, mock_aiohttp: ai
     assert "autumn_att1" in state.autumn_uploads
     assert state.autumn_uploads["autumn_att1"] == "att1"
     assert "autumn_att1" in state.referenced_autumn_ids
+    assert not [w for w in state.warnings if w["type"].startswith("upload_association_")]
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
@@ -4093,11 +4287,14 @@ async def test_sticker_registered_in_autumn_uploads(
 
     assert "autumn_s1" in state.autumn_uploads
     assert "autumn_s1" in state.referenced_autumn_ids
+    assert not [w for w in state.warnings if w["type"].startswith("upload_association_")]
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
-async def test_sticker_verify_size_pass_through(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
-    """verify_uploads on: a sticker size mismatch skips the sticker; the message still sends."""
+async def test_sticker_verify_uploads_does_not_control_autumn_size(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """Delivered-message verification does not reject a sticker from Autumn size data."""
     sticker_dir = tmp_path / "stickers"
     sticker_dir.mkdir()
     (sticker_dir / "cool.png").write_bytes(_VALID_PNG)
@@ -4117,7 +4314,7 @@ async def test_sticker_verify_size_pass_through(tmp_path: Path, mock_aiohttp: ai
     await run_messages(config, state, [export], lambda e: None)
 
     assert "msg_s2" in state.message_map  # message still sent
-    assert "s" not in state.autumn_uploads  # mismatched sticker not registered
+    assert state.autumn_uploads["s"] == "msg_s2:sticker:cool.png"
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
@@ -4145,6 +4342,7 @@ async def test_embed_media_registered_and_referenced_not_orphan(
     assert "autumn_m1" in state.referenced_autumn_ids
     orphans = set(state.autumn_uploads) - state.referenced_autumn_ids
     assert "autumn_m1" not in orphans
+    assert not [w for w in state.warnings if w["type"].startswith("upload_association_")]
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
@@ -4204,8 +4402,10 @@ async def test_embed_media_unsent_is_orphan(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
-async def test_embed_verify_size_pass_through(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
-    """verify_uploads on: an embed-media size mismatch skips the media; the message still sends."""
+async def test_embed_verify_uploads_does_not_control_autumn_size(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """Delivered-message verification does not reject embed media from Autumn size data."""
     media = tmp_path / "media"
     media.mkdir()
     (media / "thumb.png").write_bytes(_VALID_PNG)
@@ -4223,7 +4423,7 @@ async def test_embed_verify_size_pass_through(tmp_path: Path, mock_aiohttp: aior
     await run_messages(config, state, [export], lambda e: None)
 
     assert "msg_e4" in state.message_map  # message still sent
-    assert "m" not in state.autumn_uploads  # mismatched media not registered
+    assert state.autumn_uploads["m"] == "msg_e4:embed"
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
@@ -5217,7 +5417,7 @@ async def test_attachment_upload_passes_skip_cache(tmp_path: Path) -> None:
     att_file.write_bytes(_VALID_PNG)
 
     state = _make_state()
-    config = _make_config(tmp_path)
+    config = _make_config(tmp_path, verify_uploads=True)
     att = DCEAttachment(id="att1", url="pic.png", file_name="pic.png")
     msg = _make_message(id="sc1", content="attachment test", attachments=[att])
     export = _make_export(messages=[msg])
@@ -5234,6 +5434,7 @@ async def test_attachment_upload_passes_skip_cache(tmp_path: Path) -> None:
         assert call["kwargs"].get("skip_cache") is True, (
             f"upload_with_cache called without skip_cache=True: {call['kwargs']}"
         )
+        assert "verify_size" not in call["kwargs"]
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,8 @@ from discord_ferry.core import engine as engine_module
 from discord_ferry.core.engine import run_retry_failed
 from discord_ferry.discord.client import download_role_icon
 from discord_ferry.errors import AutumnUploadError, MigrationError
+from discord_ferry.migrator import delivery as delivery_module
+from discord_ferry.migrator import messages as messages_module
 from discord_ferry.migrator.avatars import _download_remote_avatar
 from discord_ferry.migrator.emoji import upload_and_create_emoji
 from discord_ferry.migrator.messages import _upload_attachments
@@ -30,7 +32,7 @@ from discord_ferry.parser.models import (
     DCEGuild,
     DCEMessage,
 )
-from discord_ferry.state import FailedMessage, MigrationState
+from discord_ferry.state import DeliveryToken, FailedMessage, MigrationState
 from discord_ferry.uploader import autumn as autumn_module
 from tests.test_delivery import (
     publication_permission_collaborator as publication_permission_collaborator,
@@ -93,6 +95,54 @@ def _config(tmp_path: Path) -> FerryConfig:
 
 def _state() -> MigrationState:
     return MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+
+
+async def test_association_mismatch_leaves_submitted_upload_orphaned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = FerryConfig(
+        export_dir=tmp_path,
+        output_dir=tmp_path,
+        stoat_url=STOAT_URL,
+        token=TOKEN,
+        verify_uploads=True,
+    )
+    state = MigrationState(
+        autumn_url=AUTUMN_URL,
+        autumn_uploads={"submitted": "source-attachment"},
+        referenced_autumn_ids={"preexisting"},
+    )
+    message = DCEMessage(
+        id="association-accounting",
+        type="Default",
+        timestamp="2024-01-01T00:00:00Z",
+        content="body",
+        author=DCEAuthor(id="user", name="User"),
+    )
+
+    async def deliver_mismatch(**_kwargs: Any) -> delivery_module.DeliveryResult:
+        return delivery_module.DeliveryResult(
+            "01J5T000000000000000000901",
+            ("observed",),
+            DeliveryToken("a" * 64, "b" * 64),
+            True,
+            False,
+            "mismatch",
+        )
+
+    monkeypatch.setattr(messages_module, "deliver_part", deliver_mismatch)
+    async with aiohttp.ClientSession() as session:
+        await messages_module._process_message(
+            msg=message,
+            stoat_channel_id="01J5T000000000000000000902",
+            config=config,
+            state=state,
+            session=session,
+            on_event=lambda event: None,
+            export_channel_id="source-channel",
+        )
+    assert state.referenced_autumn_ids == {"preexisting", "observed"}
+    assert set(state.autumn_uploads) - state.referenced_autumn_ids == {"submitted"}
 
 
 def test_upload_limits_select_same_new_user_tier_as_stoat() -> None:
