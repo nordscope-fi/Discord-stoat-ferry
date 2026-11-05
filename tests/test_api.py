@@ -19,7 +19,7 @@ from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.http import new_session
-from discord_ferry.errors import DuplicateSendError, MigrationError
+from discord_ferry.errors import DuplicateSendError, MessageSendFailure, MigrationError
 from discord_ferry.migrator import api as api_module
 from discord_ferry.migrator.api import (
     _api_request,
@@ -2428,6 +2428,159 @@ async def test_message_recovery_after_created_response_loss_uses_free_slot(
     assert failures[0].disposition == "uncertain"
     assert failures[0].http_status is None
     assert [method for method, _ in mock_aiohttp.requests] == ["POST", "GET"]
+
+
+async def test_message_slowmode_wait_uses_seconds_and_reuses_idempotency_key(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """A typed slowmode response waits in seconds and retries the same delivery."""
+    from tests.stoat_ids import stoat_id
+
+    url = f"{BASE_URL}/channels/ch1/messages"
+    mock_aiohttp.post(
+        url,
+        status=429,
+        payload={"type": "InSlowmode", "retry_after": 29},
+    )
+    mock_aiohttp.post(url, payload={"_id": stoat_id(9)})
+    wait = AsyncMock()
+
+    async with aiohttp.ClientSession() as session:
+        result = await api_send_message(
+            session,
+            BASE_URL,
+            TOKEN,
+            "ch1",
+            content="one",
+            idempotency_key="test-key",
+            message_recovery=AsyncMock(),
+            on_slowmode_wait=wait,
+        )
+
+    assert result == {"_id": stoat_id(9)}
+    wait.assert_awaited_once_with(29)
+    requests = [
+        call.kwargs["headers"] for calls in mock_aiohttp.requests.values() for call in calls
+    ]
+    assert [headers["Idempotency-Key"] for headers in requests] == ["test-key", "test-key"]
+
+
+@pytest.mark.parametrize("retry_after", [0, 29.5, "29", 21_601, 10**400])
+async def test_message_slowmode_wait_rejects_invalid_seconds(
+    mock_aiohttp: aioresponses, retry_after: object
+) -> None:
+    """Unsafe typed cooldown values must not enter the generic 429 retry path."""
+    mock_aiohttp.post(
+        f"{BASE_URL}/channels/ch1/messages",
+        status=429,
+        payload={"type": "InSlowmode", "retry_after": retry_after},
+    )
+    wait = AsyncMock()
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MessageSendFailure) as caught:
+            await api_send_message(
+                session,
+                BASE_URL,
+                TOKEN,
+                "ch1",
+                idempotency_key="test-key",
+                message_recovery=AsyncMock(),
+                on_slowmode_wait=wait,
+            )
+
+    assert caught.value.disposition == "confirmed_rejected"
+    assert caught.value.http_status == 429
+    assert caught.value.error_type == "InSlowmode"
+    wait.assert_not_awaited()
+
+
+async def test_message_slowmode_wait_releases_request_slot(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """The visible slowmode wait does not hold the message-request semaphore."""
+    from tests.stoat_ids import stoat_id
+
+    init_request_semaphore(1)
+    wait_started = asyncio.Event()
+    release_wait = asyncio.Event()
+    mock_aiohttp.post(
+        f"{BASE_URL}/channels/slow/messages",
+        status=429,
+        payload={"type": "InSlowmode", "retry_after": 29},
+    )
+    mock_aiohttp.post(f"{BASE_URL}/channels/slow/messages", payload={"_id": stoat_id(9)})
+    mock_aiohttp.post(f"{BASE_URL}/channels/other/messages", payload={"_id": stoat_id(10)})
+
+    async def wait(seconds: int) -> None:
+        assert seconds == 29
+        wait_started.set()
+        await release_wait.wait()
+
+    async with aiohttp.ClientSession() as session:
+        slow_send = asyncio.create_task(
+            api_send_message(
+                session,
+                BASE_URL,
+                TOKEN,
+                "slow",
+                idempotency_key="slow-key",
+                message_recovery=AsyncMock(),
+                on_slowmode_wait=wait,
+            )
+        )
+        await wait_started.wait()
+        other = await asyncio.wait_for(
+            api_send_message(
+                session,
+                BASE_URL,
+                TOKEN,
+                "other",
+                idempotency_key="other-key",
+                message_recovery=AsyncMock(),
+            ),
+            timeout=1,
+        )
+        release_wait.set()
+        slow = await slow_send
+
+    assert other == {"_id": stoat_id(10)}
+    assert slow == {"_id": stoat_id(9)}
+
+
+async def test_message_slowmode_wait_rejects_second_cooldown(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """One delivery may wait for slowmode once, then must stop safely."""
+    url = f"{BASE_URL}/channels/ch1/messages"
+    mock_aiohttp.post(
+        url,
+        status=429,
+        payload={"type": "InSlowmode", "retry_after": 29},
+    )
+    mock_aiohttp.post(
+        url,
+        status=429,
+        payload={"type": "InSlowmode", "retry_after": 29},
+    )
+    wait = AsyncMock()
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MessageSendFailure) as caught:
+            await api_send_message(
+                session,
+                BASE_URL,
+                TOKEN,
+                "ch1",
+                idempotency_key="test-key",
+                message_recovery=AsyncMock(),
+                on_slowmode_wait=wait,
+            )
+
+    assert caught.value.disposition == "confirmed_rejected"
+    assert caught.value.http_status == 429
+    assert caught.value.error_type == "InSlowmode"
+    wait.assert_awaited_once_with(29)
 
 
 @pytest.mark.parametrize(
