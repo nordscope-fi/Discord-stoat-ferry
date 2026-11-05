@@ -42,6 +42,7 @@ if "webview" not in webview_imports:
 # Submodules that get missed by automatic analysis
 uvicorn_imports = collect_submodules("uvicorn")
 ferry_imports = collect_submodules("discord_ferry")
+truststore_imports = collect_submodules("truststore")
 
 # ---------------------------------------------------------------------------
 # Aggregate
@@ -62,6 +63,7 @@ all_hiddenimports = (
     + webview_imports
     + uvicorn_imports
     + ferry_imports
+    + truststore_imports
     + [
         "fastapi",
         "starlette",

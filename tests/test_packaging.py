@@ -143,6 +143,15 @@ def test_ferry_spec_collects_certifi() -> None:
     )
 
 
+def test_ferry_spec_collects_truststore_submodules() -> None:
+    spec_text = (_REPO_ROOT / "ferry.spec").read_text(encoding="utf-8")
+    assert re.search(
+        r'truststore_imports\s*=\s*collect_submodules\(\s*["\']truststore["\']\s*\)',
+        spec_text,
+    )
+    assert re.search(r"all_hiddenimports\s*=.*truststore_imports", spec_text, re.DOTALL)
+
+
 def test_ferry_spec_collects_pillow_for_image_validation() -> None:
     """The spec passes Pillow's collected files to PyInstaller's build graph."""
     harness = textwrap.dedent(
@@ -436,7 +445,7 @@ def test_release_job_disables_uv_cache_before_requesting_pypi_oidc() -> None:
     )
 
 
-def test_release_workflow_asserts_the_union_branch_on_macos() -> None:
+def test_release_workflow_asserts_native_context_on_macos() -> None:
     """SC-134-18 companion: macOS must gate on the union branch too.
 
     Windows has asserted this since v2.13.0. Without the same check on macOS, a
@@ -450,16 +459,99 @@ def test_release_workflow_asserts_the_union_branch_on_macos() -> None:
     """
     text = (_REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     macos_block = text.split("build-macos:")[1]
-    assert "tls-check" in macos_block, "the macOS job must run tls-check"
-    assert re.search(r'\*"trust-source: union"\*', macos_block), (
-        "the macOS job must gate on the union branch, not merely run the command"
+    assert 'assert_healthy_native_tls "built app"' in macos_block
+    assert 'assert_healthy_native_tls "extracted app"' in macos_block
+    assert '*"trust-source: native-union"*' in macos_block
+    assert '*"ca-visible: unavailable"*' in macos_block
+    assert _fails_the_build_after(macos_block, '*"trust-source: native-union"*', "esac")
+    assert _fails_the_build_after(macos_block, '*"ca-visible: unavailable"*', "esac")
+    assert "arch: arm64" in macos_block and "arch: x86_64" in macos_block
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS workflow block requires POSIX bash")
+@pytest.mark.parametrize(
+    ("built_output", "extracted_output", "expected_status", "expected_report"),
+    [
+        pytest.param(
+            "trust-source: native-union\nca-visible: unavailable\nproxy-source: direct",
+            "trust-source: native-union\nca-visible: unavailable\nproxy-source: direct",
+            0,
+            "extracted app: trust-source: native-union",
+            id="healthy",
+        ),
+        pytest.param(
+            "trust-source: native\nca-visible: unavailable\nproxy-source: direct",
+            "trust-source: native-union\nca-visible: unavailable\nproxy-source: direct",
+            1,
+            "built app did not initialize native trust with certifi",
+            id="missing-native-union",
+        ),
+        pytest.param(
+            "trust-source: native-union\nca-visible: 42\nproxy-source: direct",
+            "trust-source: native-union\nca-visible: unavailable\nproxy-source: direct",
+            1,
+            "built app did not report capability-safe native diagnostics",
+            id="enumerable-native-ca",
+        ),
+        pytest.param(
+            "trust-source: native-union\nca-visible: unavailable",
+            "trust-source: native-union\nca-visible: unavailable\nproxy-source: direct",
+            1,
+            "built app did not report proxy state",
+            id="built-missing-proxy",
+        ),
+        pytest.param(
+            "trust-source: native-union\nca-visible: unavailable\nproxy-source: direct",
+            "trust-source: native-union\nca-visible: unavailable",
+            1,
+            "extracted app did not report proxy state",
+            id="extracted-missing-proxy",
+        ),
+    ],
+)
+def test_release_workflow_executes_macos_tls_checks(
+    tmp_path: Path,
+    built_output: str,
+    extracted_output: str,
+    expected_status: int,
+    expected_report: str,
+) -> None:
+    """Run the workflow's native TLS checks against both application locations."""
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    macos_job = workflow.split("build-macos:", 1)[1].split("\n  release:", 1)[0]
+    tls_marker = (
+        "          # The built and extracted applications must both use native macOS trust."
     )
-    assert "Contents/MacOS/Ferry" in macos_block, (
-        "it must run the extracted bundle's inner binary, so the ditto round-trip is covered"
+    tls_block = macos_job.split(tls_marker, 1)[1].split("          codesign --verify", 1)[0]
+
+    for executable, output in (
+        (tmp_path / "dist" / "Ferry.app" / "Contents" / "MacOS" / "Ferry", built_output),
+        (
+            tmp_path / "_verify" / "Ferry.app" / "Contents" / "MacOS" / "Ferry",
+            extracted_output,
+        ),
+    ):
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_text(
+            "#!/usr/bin/env bash\n" + "cat <<'TLS_OUTPUT'\n" + output + "\nTLS_OUTPUT\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        executable.chmod(0o755)
+
+    bash = shutil.which("bash")
+    assert bash is not None, "macOS release jobs execute this block through bash"
+    result = subprocess.run(
+        [bash, "-eu", "-o", "pipefail", "-c", 'APP="_verify/Ferry.app"\n' + tls_block],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
     )
-    assert _fails_the_build_after(macos_block, '*"trust-source: union"*', "esac"), (
-        "the union case must reach an exit 1, not merely echo an ::error:: and continue"
-    )
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == expected_status, combined
+    assert expected_report in combined
 
 
 def test_release_workflow_uses_supported_arm64_runner_and_checks_minimum_macos() -> None:
