@@ -235,6 +235,13 @@ class _RunState:
 
     total_channels: int | None = None
     channels_completed: set[str] = field(default_factory=set)
+    final_progress: tuple[int, int] | None = None
+
+
+def _progress_counts(state: _RunState) -> tuple[int, int]:
+    if state.final_progress is not None:
+        return state.final_progress
+    return len(state.channels_completed), state.total_channels or 0
 
 
 _DCE_CHANNEL_FAILURE_HEADER = "Failed to export the following channel(s):"
@@ -285,8 +292,7 @@ def _emit_for_parsed(
         case PerChannel(channel=ch, pct=p):
             if p == 100:
                 state.channels_completed.add(ch)
-            current = len(state.channels_completed)
-            total = state.total_channels or 0
+            current, total = _progress_counts(state)
             label = f"Finished {ch}" if p == 100 else f"{ch} ({p}%)"
             on_event(
                 MigrationEvent(
@@ -301,13 +307,14 @@ def _emit_for_parsed(
         case Phase(kind="exporting_header", count=n, message=msg):
             if state.total_channels is None and n is not None:
                 state.total_channels = n
+            current, total = _progress_counts(state)
             on_event(
                 MigrationEvent(
                     phase="export",
                     status="progress",
                     message=msg,
-                    current=len(state.channels_completed),
-                    total=state.total_channels or 0,
+                    current=current,
+                    total=total,
                 )
             )
         case Phase(message=msg):
@@ -332,11 +339,14 @@ def _emit_for_parsed(
                         ),
                     )
                 )
+            state.final_progress = (s, max(state.total_channels or 0, s))
             on_event(
                 MigrationEvent(
                     phase="export",
                     status="progress",
                     message=msg,
+                    current=state.final_progress[0],
+                    total=state.final_progress[1],
                 )
             )
         case Banner(message=msg) | StatusDot(message=msg) | Raw(message=msg):

@@ -372,6 +372,75 @@ class TestRawLinesRoutedToGui:
 
 class TestSuccessCountWarning:
     @pytest.mark.asyncio
+    async def test_success_reconciles_colliding_progress_labels(self, tmp_path: Path) -> None:
+        process = _make_process(
+            [
+                b"Exporting 2 channel(s)...\n",
+                b"same / name: 100%\n",
+                b"same / name: 100%\n",
+                b"Successfully exported 2 channel(s).\n",
+            ]
+        )
+        events: list[MigrationEvent] = []
+
+        with patch(
+            "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=process),
+        ):
+            await run_dce_export(_make_config(tmp_path), tmp_path / "dce", events.append)
+
+        counted = [event for event in events if event.total > 0]
+        assert [(event.current, event.total) for event in counted[-3:]] == [(1, 2), (1, 2), (2, 2)]
+
+    @pytest.mark.asyncio
+    async def test_success_progress_survives_later_channel_and_header(self, tmp_path: Path) -> None:
+        process = _make_process(
+            [
+                b"Exporting 2 channel(s)...\n",
+                b"same / name: 100%\n",
+                b"Successfully exported 1 channel(s).\n",
+                b"later channel: 100%\n",
+                b"Exporting 3 channel(s)...\n",
+            ]
+        )
+        events: list[MigrationEvent] = []
+
+        with patch(
+            "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=process),
+        ):
+            await run_dce_export(_make_config(tmp_path), tmp_path / "dce", events.append)
+
+        counted = [event for event in events if event.total > 0]
+        assert [(event.current, event.total) for event in counted[-3:]] == [(1, 2), (1, 2), (1, 2)]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("lines", "expected"),
+        [
+            ([b"Exporting 3 channel(s)...\n", b"Successfully exported 2 channel(s).\n"], (2, 3)),
+            ([b"Exporting 1 channel(s)...\n", b"Successfully exported 2 channel(s).\n"], (2, 2)),
+            ([b"Successfully exported 2 channel(s).\n"], (2, 2)),
+        ],
+    )
+    async def test_success_reconciles_header_disagreement(
+        self, tmp_path: Path, lines: list[bytes], expected: tuple[int, int]
+    ) -> None:
+        process = _make_process(lines)
+        events: list[MigrationEvent] = []
+
+        with patch(
+            "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=process),
+        ):
+            await run_dce_export(_make_config(tmp_path), tmp_path / "dce", events.append)
+
+        success = next(
+            event for event in events if event.message.startswith("Successfully exported")
+        )
+        assert (success.current, success.total) == expected
+
+    @pytest.mark.asyncio
     async def test_success_less_than_total_emits_warning(self, tmp_path: Path) -> None:
         lines = [
             b"Exporting 10 channel(s)...\n",
