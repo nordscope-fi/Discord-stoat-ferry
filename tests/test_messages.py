@@ -1222,7 +1222,7 @@ async def test_embed_text_uses_message_id_maps(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     msg = _make_message(
         id="embed-remap",
-        content="embed",
+        content="body <@&321>",
         embeds=[
             {
                 "title": "Hello <@123> <:party:999>",
@@ -1241,9 +1241,10 @@ async def test_embed_text_uses_message_id_maps(tmp_path: Path) -> None:
         await run_messages(config, state, [_make_export(messages=[msg])], lambda e: None)
 
     embed = sent[0]["embeds"][0]
+    assert "<%stoat_role>" in str(sent[0]["content"])
     assert embed["title"] == "Hello @Alice :stoat_emoji:"
     assert "See <#01J5T007054896543067026524>" in embed["description"]
-    assert "**Role <@&stoat_role>**" in embed["description"]
+    assert "**Role <%stoat_role>**" in embed["description"]
     assert "Emoji :stoat_emoji:" in embed["description"]
 
 

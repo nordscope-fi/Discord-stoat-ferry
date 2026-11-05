@@ -110,10 +110,20 @@ def test_remap_role_mention_mapped() -> None:
     result = remap_mentions(
         "<@&123>",
         channel_map={},
-        role_map={"123": "stoat_role_xyz"},
+        role_map={"123": "01J5T000000000000000000001"},
         author_names={},
     )
-    assert result == "<@&stoat_role_xyz>"
+    assert result == "<%01J5T000000000000000000001>"
+
+
+def test_remap_role_mention_preserves_code() -> None:
+    content = "outside <@&123> and \x60<@&123>\x60\n\x60\x60\x60text\n<@&123>\n\x60\x60\x60"
+    result = remap_mentions(content, {}, {"123": "01J5T000000000000000000001"}, {})
+    expected = (
+        "outside <%01J5T000000000000000000001> and \x60<@&123>\x60\n"
+        "\x60\x60\x60text\n<@&123>\n\x60\x60\x60"
+    )
+    assert result == expected
 
 
 def test_remap_role_mention_unmapped() -> None:
@@ -134,7 +144,7 @@ def test_remap_mentions_multiple() -> None:
         role_map={"789": "stoat_role"},
         author_names={"123": "Alice"},
     )
-    assert result == "Hey @Alice, go to <#stoat_ch> for info about <@&stoat_role>."
+    assert result == "Hey @Alice, go to <#stoat_ch> for info about <%stoat_role>."
 
 
 def test_remap_mentions_preserves_code_block() -> None:

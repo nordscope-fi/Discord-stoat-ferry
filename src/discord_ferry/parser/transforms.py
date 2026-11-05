@@ -114,7 +114,7 @@ def remap_mentions(
     def replace_role(m: re.Match[str]) -> str:
         rid = m.group(1)
         if rid in role_map:
-            return f"<@&{role_map[rid]}>"
+            return f"<%{role_map[rid]}>"
         return "@deleted-role"
 
     def apply_all(text: str) -> str:
