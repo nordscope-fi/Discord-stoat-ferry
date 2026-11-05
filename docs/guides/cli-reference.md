@@ -99,6 +99,7 @@ ferry migrate [OPTIONS]
 | `--reaction-mode [text\|native\|skip]` | | `text` | How reactions migrate: `text` appends a summary to the message (fast); `native` adds per-emoji reactions via API (slow, Stoat caps 20 per message); `skip` drops them |
 | `--min-thread-messages INT` | | 0 | Exclude threads with fewer messages (0 = include all). Applies to every thread strategy. |
 | `--checkpoint-interval INT` | | 50 | Save state at the first multiple of N messages reached at least 5 seconds after the last save. Lower = safer but more disk I/O. On a fast run a resume can replay more than N messages. |
+| `--dce-parallel INT` | | 1 | Discord channels DiscordChatExporter exports in parallel before migration. This does not change Ferry's migration-channel or API-request workers. |
 | `--max-concurrent-channels INT` | | 3 | Channels migrated in parallel. Raise only on self-hosted instances. |
 | `--max-concurrent-requests INT` | | 5 | Concurrent API calls across all channel workers. Raise only on self-hosted instances. |
 | `--skip-avatars` | | false | Skip the avatar pre-flight phase; avatars still upload on demand during messages |
@@ -144,7 +145,7 @@ Ferry also reads a handful of environment variables beyond the credentials above
 ---
 
 !!! warning "Concurrency on the official service"
-    Raising `--max-concurrent-channels` / `--max-concurrent-requests` against `api.stoat.chat` usually makes runs **slower**, the official rate limits trigger 429 backoff. Ferry prints a warning when you try. These flags are for self-hosted instances with relaxed limits.
+    Raising `--max-concurrent-channels` / `--max-concurrent-requests` against `api.stoat.chat` usually makes runs **slower**, the official rate limits trigger 429 backoff. Ferry prints a warning when you try. These flags are for self-hosted instances with relaxed limits. `--dce-parallel` controls DiscordChatExporter before migration and does not change either Stoat migration limit.
 
 !!! note "Two flags named --max-concurrent-requests"
     `ferry migrate --max-concurrent-requests` controls migration API calls. `ferry rollback` has an unrelated flag of the same name that controls concurrent channel deletions.
