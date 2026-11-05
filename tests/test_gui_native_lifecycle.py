@@ -28,7 +28,8 @@ if TYPE_CHECKING:
 @pytest.fixture(autouse=True)
 def isolate_gui_storage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Keep entry-point lifecycle tests out of the real per-user storage directory."""
-    monkeypatch.setattr(gui, "_configure_gui_storage", lambda: tmp_path)
+    layout = gui._GuiStorageLayout(root=tmp_path, selected=tmp_path, secret="test-secret")
+    monkeypatch.setattr(gui, "_configure_gui_storage", lambda: layout)
     monkeypatch.setattr(gui, "_ensure_gui_port_available", lambda: None, raising=False)
 
 
@@ -275,7 +276,7 @@ class TestMainLifecycle:
         before uvicorn installs its handlers.
         """
 
-        def _interrupt() -> None:
+        def _interrupt(_secret: str | None = None) -> None:
             raise KeyboardInterrupt
 
         monkeypatch.setattr(gui, "_run_gui", _interrupt)
@@ -284,7 +285,7 @@ class TestMainLifecycle:
         assert excinfo.value.code == 130
 
     def test_normal_return_does_not_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(gui, "_run_gui", lambda: None)
+        monkeypatch.setattr(gui, "_run_gui", lambda _secret=None: None)
         gui.main()
 
     def test_non_frozen_main_never_dispatches_to_cli(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -298,7 +299,7 @@ class TestMainLifecycle:
         monkeypatch.delattr("sys.frozen", raising=False)
         monkeypatch.setattr("sys.argv", ["ferry-gui", "--ignore=tests/x.py"])
         called: list[str] = []
-        monkeypatch.setattr(gui, "_run_gui", lambda: called.append("gui"))
+        monkeypatch.setattr(gui, "_run_gui", lambda _secret=None: called.append("gui"))
         monkeypatch.setattr(gui, "configure_logging", lambda: None)
 
         gui.main()
@@ -324,7 +325,7 @@ class TestMainLifecycle:
             raise SystemExit(0)
 
         monkeypatch.setattr(gui.entry, "run_cli", _run_cli)
-        monkeypatch.setattr(gui, "_run_gui", lambda: calls.append("gui"))
+        monkeypatch.setattr(gui, "_run_gui", lambda _secret=None: calls.append("gui"))
         monkeypatch.setattr(gui, "configure_logging", lambda: calls.append("logging"))
 
         with pytest.raises(SystemExit) as excinfo:

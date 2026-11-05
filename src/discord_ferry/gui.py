@@ -133,12 +133,56 @@ def _default_gui_output_dir() -> Path:
     return _gui_data_dir() / "ferry-output"
 
 
-def _configure_gui_storage() -> Path:
-    """Point NiceGUI's disk-backed user storage at Ferry's writable data directory."""
-    storage_dir = _gui_data_dir() / "nicegui"
-    storage_dir.mkdir(parents=True, exist_ok=True)
-    Storage.path = storage_dir
-    return storage_dir
+class _GuiStorageLayout(NamedTuple):
+    """The shared root, selected namespace, and signing value for one GUI launch."""
+
+    root: Path
+    selected: Path
+    secret: str
+
+
+def _is_safe_gui_storage_directory(metadata: os.stat_result) -> bool:
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISDIR(metadata.st_mode) and not (
+        getattr(metadata, "st_file_attributes", 0) & reparse
+    )
+
+
+def _ensure_gui_storage_directory(path: Path) -> Path:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        try:
+            parent_metadata = path.parent.lstat()
+        except OSError as exc:
+            raise _GuiStorageLockError("Ferry GUI storage directory is unsafe") from exc
+        if not _is_safe_gui_storage_directory(parent_metadata):
+            raise _GuiStorageLockError("Ferry GUI storage directory is unsafe") from None
+        with contextlib.suppress(FileExistsError):
+            path.mkdir(mode=0o700)
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise _GuiStorageLockError("Ferry GUI storage directory is unsafe") from exc
+    except OSError as exc:
+        raise _GuiStorageLockError("Ferry GUI storage directory is unsafe") from exc
+    if not _is_safe_gui_storage_directory(metadata):
+        raise _GuiStorageLockError("Ferry GUI storage directory is unsafe")
+    return path
+
+
+def _configure_gui_storage() -> _GuiStorageLayout:
+    """Select the owned GUI storage namespace and signing value for this launch."""
+    data_dir = _ensure_gui_storage_directory(_gui_data_dir())
+    root = _ensure_gui_storage_directory(data_dir / "nicegui")
+    if "FERRY_STORAGE_SECRET" in os.environ:
+        selected = root
+        secret = os.environ["FERRY_STORAGE_SECRET"]
+    else:
+        selected = _ensure_gui_storage_directory(root / "default-session")
+        secret = secrets.token_hex(32)
+    Storage.path = selected
+    return _GuiStorageLayout(root=root, selected=selected, secret=secret)
 
 
 class _GuiStorageLockError(RuntimeError):
@@ -2524,9 +2568,11 @@ def _install_host_guard() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _run_gui() -> None:
+def _run_gui(secret: str | None = None) -> None:
     """Start the UI and guarantee native cleanup and scoped launcher restoration."""
     global _active_native_launcher
+    if secret is None:
+        secret = os.environ.get("FERRY_STORAGE_SECRET", secrets.token_hex(32))
     native_requested = _native_enabled()
     _install_host_guard()
     fallback: BrowserFallback | None = None
@@ -2557,7 +2603,7 @@ def _run_gui() -> None:
                 native=native,
                 show=show,
                 reload=False,
-                storage_secret=os.environ.get("FERRY_STORAGE_SECRET", secrets.token_hex(32)),
+                storage_secret=secret,
                 reconnect_timeout=10.0,
                 timeout_graceful_shutdown=1,
                 proxy_headers=False,
@@ -2598,13 +2644,13 @@ def main() -> None:
     # spawn child never reaches main() at all, so the ordering is merely inert
     # there, not wrong.)
     configure_logging()
-    storage_dir = _configure_gui_storage()
-    lock = _acquire_gui_storage_lock(storage_dir)
+    layout = _configure_gui_storage()
+    lock = _acquire_gui_storage_lock(layout.root)
 
     try:
         _ensure_gui_port_available()
-        _scrub_historical_gui_records(storage_dir)
-        _run_gui()
+        _scrub_historical_gui_records(layout.root)
+        _run_gui(layout.secret)
     except KeyboardInterrupt:
         # Two routine sources, not just a stray Ctrl-C: uvicorn re-raises a captured
         # SIGINT after restoring the default handler, and NiceGUI's check_shutdown thread
