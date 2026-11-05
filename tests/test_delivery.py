@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.util
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 import aiohttp
@@ -693,6 +694,7 @@ async def test_delivery_receipt_rejects_key_not_bound_to_attempt_before_http(tmp
 
 async def test_delivery_receipt_legacy_match_retains_remote_media_not_new_uploads(tmp_path: Path):
     module, config, state, ref, receipt = _delivery_fixture(tmp_path, status="prepared")
+    config = replace(config, verify_uploads=True)
     receipt.parts[0].autumn_ids = []
     write_delivery_receipt(state, tmp_path, receipt)
     url = f"{config.stoat_url}/channels/{ref.destination_channel_id}/messages?limit=100&sort=Latest"
@@ -724,6 +726,7 @@ async def test_delivery_receipt_legacy_match_retains_remote_media_not_new_upload
         assert all(method == "GET" for method, _ in http.requests)
     assert result.message_id == stoat_id(8)
     assert list(result.autumn_ids) == ["legacy_original"]
+    assert result.association_status == "observed_only"
 
 
 @pytest.mark.parametrize("case", ["complete", "missing", "ambiguous", "mixed_generations"])
@@ -1037,3 +1040,353 @@ async def test_delivery_receipt_preserves_outbound_embed_media(tmp_path: Path):
                 embeds=[{"type": "Text", "media": "original_embed"}],
             )
     assert list(result.autumn_ids) == ["original_attachment", "original_embed"]
+
+
+@pytest.mark.parametrize(
+    (
+        "attachments",
+        "embeds",
+        "response",
+        "expected_status",
+        "expected_returned",
+        "expected_stored",
+    ),
+    [
+        (
+            ["attachment"],
+            [{"type": "Text", "media": "embed"}],
+            {
+                "attachments": [{"_id": "attachment"}],
+                "embeds": [{"type": "Text", "media": {"_id": "embed"}}],
+            },
+            "matched",
+            ("attachment", "embed"),
+            ["attachment", "embed"],
+        ),
+        (
+            ["attachment", "missing"],
+            None,
+            {"attachments": [{"_id": "attachment"}]},
+            "mismatch",
+            ("attachment",),
+            ["attachment"],
+        ),
+        (
+            None,
+            [{"type": "Text", "media": "submitted_embed"}],
+            {"embeds": [{"type": "Text", "media": {"_id": "observed_embed"}}]},
+            "mismatch",
+            ("observed_embed",),
+            ["observed_embed"],
+        ),
+        (
+            ["submitted_attachment"],
+            None,
+            {"attachments": [{"wrong": "shape"}]},
+            "unavailable",
+            (),
+            ["submitted_attachment"],
+        ),
+    ],
+)
+@pytest.mark.usefixtures("publication_permission_collaborator")
+async def test_delivery_verification_saves_observed_media(
+    tmp_path: Path,
+    attachments: list[str] | None,
+    embeds: list[dict[str, object]] | None,
+    response: dict[str, object],
+    expected_status: str,
+    expected_returned: tuple[str, ...],
+    expected_stored: list[str],
+) -> None:
+    module, config, state, _, _ = _delivery_fixture(tmp_path, status="prepared")
+    ref = DeliveryRef("123", "new-message", stoat_id(1), "ordinary")
+    config = replace(config, verify_uploads=True)
+    payload = {"_id": stoat_id(9), **response}
+    with aioresponses() as http:
+        http.post(
+            f"{config.stoat_url}/channels/{ref.destination_channel_id}/messages",
+            payload=payload,
+        )
+        async with aiohttp.ClientSession() as session:
+            result = await module.deliver_part(
+                session=session,
+                config=config,
+                state=state,
+                ref=ref,
+                part_index=0,
+                part_count=1,
+                render_digest="c" * 64,
+                content="one",
+                attachments=attachments,
+                embeds=embeds,
+            )
+    saved = read_delivery_receipt(state, tmp_path, ref)
+    assert result.message_id == stoat_id(9)
+    assert result.association_status == expected_status
+    assert result.autumn_ids == expected_returned
+    assert saved is not None
+    assert saved.parts[0].association_status == expected_status
+    assert saved.parts[0].autumn_ids == expected_stored
+    assert [method for method, _ in http.requests] == ["POST"]
+
+
+async def test_delivery_recovery_verification_saves_observed_media(tmp_path: Path) -> None:
+    module, config, state, ref, receipt = _delivery_fixture(tmp_path)
+    config = replace(config, verify_uploads=True)
+    url = f"{config.stoat_url}/channels/{ref.destination_channel_id}/messages?limit=100&sort=Latest"
+    with aioresponses() as http:
+        http.get(
+            url,
+            payload=[
+                {
+                    "_id": stoat_id(9),
+                    "channel": ref.destination_channel_id,
+                    "nonce": receipt.parts[0].key,
+                    "attachments": [{"_id": "observed"}],
+                }
+            ],
+        )
+        async with aiohttp.ClientSession() as session:
+            result = await module.deliver_part(
+                session=session,
+                config=config,
+                state=state,
+                ref=ref,
+                part_index=0,
+                part_count=1,
+                render_digest="c" * 64,
+                content="one",
+            )
+    saved = read_delivery_receipt(state, tmp_path, ref)
+    assert result.association_status == "mismatch"
+    assert result.autumn_ids == ("observed",)
+    assert saved is not None
+    assert saved.parts[0].association_status == "mismatch"
+    assert saved.parts[0].autumn_ids == ["observed"]
+    assert [method for method, _ in http.requests] == ["GET"]
+
+
+async def test_delivery_prepared_recovery_saves_observed_only_media(tmp_path: Path) -> None:
+    module, config, state, ref, receipt = _delivery_fixture(tmp_path, status="prepared")
+    config = replace(config, verify_uploads=True)
+    url = f"{config.stoat_url}/channels/{ref.destination_channel_id}/messages?limit=100&sort=Latest"
+    with aioresponses() as http:
+        http.get(
+            url,
+            payload=[
+                {
+                    "_id": stoat_id(10),
+                    "channel": ref.destination_channel_id,
+                    "nonce": receipt.parts[0].key,
+                    "attachments": [{"_id": "observed"}],
+                }
+            ],
+        )
+        async with aiohttp.ClientSession() as session:
+            result = await module.deliver_part(
+                session=session,
+                config=config,
+                state=state,
+                ref=ref,
+                part_index=0,
+                part_count=1,
+                render_digest="c" * 64,
+                content="one",
+            )
+    saved = read_delivery_receipt(state, tmp_path, ref)
+    assert result.message_id == stoat_id(10)
+    assert result.association_status == "observed_only"
+    assert result.autumn_ids == ("observed",)
+    assert saved is not None
+    assert saved.parts[0].association_status == "observed_only"
+    assert [method for method, _ in http.requests] == ["GET"]
+
+
+@pytest.mark.usefixtures("publication_permission_collaborator")
+async def test_delivery_callback_recovery_keeps_history_media(tmp_path: Path) -> None:
+    module = importlib.import_module("discord_ferry.migrator.delivery")
+    config = FerryConfig(
+        export_dir=tmp_path,
+        output_dir=tmp_path,
+        stoat_url="https://api.test",
+        token="test-token",
+        verify_uploads=True,
+    )
+    state = MigrationState()
+    ref = DeliveryRef("123", "456", stoat_id(1), "ordinary")
+    created: dict[str, object] = {}
+    sent = 0
+
+    async def create_then_drop(url, **kwargs):
+        nonlocal sent
+        sent += 1
+        created.update(
+            {
+                "_id": stoat_id(17),
+                "channel": ref.destination_channel_id,
+                "nonce": kwargs["headers"]["Idempotency-Key"],
+                "attachments": [{"_id": "observed_autumn"}],
+            }
+        )
+        raise aiohttp.ServerDisconnectedError("lost response")
+
+    history_url = (
+        f"{config.stoat_url}/channels/{ref.destination_channel_id}/messages?limit=100&sort=Latest"
+    )
+    with aioresponses() as http:
+        http.post(
+            f"{config.stoat_url}/channels/{ref.destination_channel_id}/messages",
+            callback=create_then_drop,
+        )
+        http.get(history_url, payload=[created])
+        async with aiohttp.ClientSession() as session:
+            result = await module.deliver_part(
+                session=session,
+                config=config,
+                state=state,
+                ref=ref,
+                part_index=0,
+                part_count=1,
+                render_digest="c" * 64,
+                content="recovered",
+                attachments=["submitted_autumn"],
+            )
+    saved = read_delivery_receipt(state, tmp_path, ref)
+    assert sent == 1
+    assert [method for method, _ in http.requests] == ["POST", "GET"]
+    assert result.recovered is True
+    assert result.message_id == stoat_id(17)
+    assert result.association_status == "mismatch"
+    assert result.autumn_ids == ("observed_autumn",)
+    assert saved is not None
+    assert saved.parts[0].autumn_ids == ["observed_autumn"]
+    assert saved.parts[0].association_status == "mismatch"
+
+
+async def test_delivery_verification_marks_old_acknowledgement_unavailable(tmp_path: Path) -> None:
+    module, config, state, ref, _ = _delivery_fixture(tmp_path, status="acknowledged")
+    config = replace(config, verify_uploads=True)
+    with aioresponses() as http:
+        async with aiohttp.ClientSession() as session:
+            result = await module.deliver_part(
+                session=session,
+                config=config,
+                state=state,
+                ref=ref,
+                part_index=0,
+                part_count=1,
+                render_digest="c" * 64,
+                content="one",
+            )
+        assert not http.requests
+    saved = read_delivery_receipt(state, tmp_path, ref)
+    assert result.association_status == "unavailable"
+    assert result.autumn_ids == ()
+    assert saved is not None
+    assert saved.parts[0].message_id == stoat_id(7)
+    assert saved.parts[0].association_status == "unavailable"
+    assert saved.parts[0].autumn_ids == ["original_autumn"]
+
+
+async def test_delivery_saved_mismatch_resumes_without_http(tmp_path: Path) -> None:
+    module, config, state, ref, receipt = _delivery_fixture(tmp_path, status="acknowledged")
+    config = replace(config, verify_uploads=True)
+    receipt.parts[0].autumn_ids = ["observed"]
+    receipt.parts[0].association_status = "mismatch"
+    write_delivery_receipt(state, tmp_path, receipt)
+    with aioresponses() as http:
+        async with aiohttp.ClientSession() as session:
+            result = await module.deliver_part(
+                session=session,
+                config=config,
+                state=state,
+                ref=ref,
+                part_index=0,
+                part_count=1,
+                render_digest="c" * 64,
+                content="one",
+            )
+        assert not http.requests
+    assert result.message_id == stoat_id(7)
+    assert result.association_status == "mismatch"
+    assert result.autumn_ids == ("observed",)
+
+
+@pytest.mark.usefixtures("publication_permission_collaborator")
+async def test_delivery_disabled_keeps_submitted_media(tmp_path: Path) -> None:
+    module, config, state, _, _ = _delivery_fixture(tmp_path, status="prepared")
+    ref = DeliveryRef("123", "disabled", stoat_id(1), "ordinary")
+    with aioresponses() as http:
+        http.post(
+            f"{config.stoat_url}/channels/{ref.destination_channel_id}/messages",
+            payload={"_id": stoat_id(18), "attachments": [{"wrong": "shape"}]},
+        )
+        async with aiohttp.ClientSession() as session:
+            result = await module.deliver_part(
+                session=session,
+                config=config,
+                state=state,
+                ref=ref,
+                part_index=0,
+                part_count=1,
+                render_digest="c" * 64,
+                content="one",
+                attachments=["submitted_attachment"],
+                embeds=[{"type": "Text", "media": "submitted_embed"}],
+            )
+    assert result.association_status is None
+    assert result.autumn_ids == ("submitted_attachment", "submitted_embed")
+    assert [method for method, _ in http.requests] == ["POST"]
+
+
+@pytest.mark.parametrize("verify_uploads", [False, True])
+async def test_delivery_malformed_legacy_media_respects_verification_mode(
+    tmp_path: Path, verify_uploads: bool
+) -> None:
+    module, config, state, ref, receipt = _delivery_fixture(tmp_path, status="prepared")
+    config = replace(config, verify_uploads=verify_uploads)
+    receipt.parts[0].autumn_ids = []
+    write_delivery_receipt(state, tmp_path, receipt)
+    url = f"{config.stoat_url}/channels/{ref.destination_channel_id}/messages?limit=100&sort=Latest"
+    with aioresponses() as http:
+        http.get(
+            url,
+            payload=[
+                {
+                    "_id": stoat_id(19),
+                    "channel": ref.destination_channel_id,
+                    "nonce": "ferry-456",
+                    "attachments": [{"wrong": "shape"}],
+                }
+            ],
+        )
+        async with aiohttp.ClientSession() as session:
+            call = module.deliver_part(
+                session=session,
+                config=config,
+                state=state,
+                ref=ref,
+                part_index=0,
+                part_count=1,
+                render_digest="c" * 64,
+                content="one",
+                legacy_keys=("ferry-456",),
+            )
+            if not verify_uploads:
+                with pytest.raises(DeliveryUnresolvedError):
+                    await call
+            else:
+                result = await call
+                assert result.message_id == stoat_id(19)
+                assert result.association_status == "unavailable"
+                assert result.autumn_ids == ()
+    assert [method for method, _ in http.requests] == ["GET"]
+    saved = read_delivery_receipt(state, tmp_path, ref)
+    assert saved is not None
+    if verify_uploads:
+        assert saved.parts[0].status == "acknowledged"
+        assert saved.parts[0].message_id == stoat_id(19)
+        assert saved.parts[0].association_status == "unavailable"
+    else:
+        assert saved.parts[0].status == "prepared"
