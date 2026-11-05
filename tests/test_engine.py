@@ -3089,6 +3089,33 @@ async def test_retry_failed_success_removes_from_list(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("retry_permission_unit_boundary")
+async def test_retry_failed_passes_export_name_to_message_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A selected retry keeps the exported channel name for a slowmode notice."""
+    config = _make_retry_config(tmp_path)
+    config.output_dir.mkdir()
+    _write_dce_json(config.export_dir, "ch1", [_dce_msg_dict("msg_retry", "retry me")])
+    exports = _make_exports_from_dir(config.export_dir)
+    state = MigrationState(
+        channel_map={"ch1": "01J5T013913344331853682639"},
+        failed_messages=[
+            FailedMessage(
+                discord_msg_id="msg_retry",
+                stoat_channel_id="01J5T013913344331853682639",
+                error="timeout",
+            )
+        ],
+    )
+    process = AsyncMock(return_value=True)
+    monkeypatch.setattr(engine_module, "_process_message", process)
+
+    await run_retry_failed(config, state, exports, lambda _event: None, _upload_limits_ready=True)
+
+    assert process.await_args.kwargs["source_channel_name"] == "channel-ch1"
+
+
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_failed_still_failing_increments_count(tmp_path: Path) -> None:
     """A message that fails again increments retry_count and stays in the list."""
     config = _make_retry_config(tmp_path)
@@ -4701,6 +4728,65 @@ async def test_rebuild_one_forum_index_matches_loop(tmp_path: Path) -> None:
         async with aiohttp.ClientSession() as session:
             await _rebuild_one_forum_index(session, config, state, "forum-news", lambda e: None)
     assert state.forum_index_message_ids["forum-news"] == "01J5T000000000000000002302"
+
+
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
+@pytest.mark.parametrize(("force_new", "phase"), [(False, "report"), (True, "repair")])
+async def test_forum_index_slowmode_wait_reports_rebuild_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force_new: bool, phase: str
+) -> None:
+    """Both rebuilt forum-index sends report the phase and index-channel name."""
+    from discord_ferry.migrator.delivery import DeliveryResult
+    from discord_ferry.state import DeliveryToken
+
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, upload_delay=0)
+    index_id = "01J5T000000000000000002300"
+    message_id = "01J5T000000000000000002301"
+    state = MigrationState(
+        stoat_server_id="stoat-srv",
+        forum_channel_members={"forum-news": ["d1"]},
+        forum_category_names={"forum-news": "News"},
+        channel_map={"d1": "s1", "forum-index-forum-news": index_id},
+        channel_message_counts={"d1": 3},
+    )
+
+    async def deliver_index(*, on_slowmode_wait, **_kwargs):
+        await on_slowmode_wait(29)
+        return DeliveryResult(
+            message_id,
+            (),
+            DeliveryToken("2" * 64, "3" * 64),
+            True,
+            False,
+        )
+
+    monkeypatch.setattr(engine_module, "deliver_part", deliver_index)
+    with aioresponses() as remote:
+        remote.post(f"{config.stoat_url}/channels/{index_id}/messages/{message_id}/pin", payload={})
+        async with aiohttp.ClientSession() as session:
+            await engine_module._rebuild_one_forum_index(
+                session,
+                config,
+                state,
+                "forum-news",
+                events.append,
+                phase=phase,
+                force_new=force_new,
+            )
+
+    assert [
+        (event.phase, event.status, event.channel_name, event.detail)
+        for event in events
+        if event.status == "notice"
+    ] == [
+        (
+            phase,
+            "notice",
+            "News-index",
+            {"kind": "slowmode_wait", "retry_after_seconds": 29},
+        )
+    ]
 
 
 @pytest.mark.usefixtures("forum_permission_unit_boundary")
@@ -8162,6 +8248,82 @@ async def test_a_non_numeric_message_id_does_not_break_the_mark(tmp_path: Path) 
     export.messages.extend(_dce_msg(i) for i in ids)
     state, _, _ = await _repair_resending(tmp_path, exports=[export], msg_ids=ids)
     assert state.channel_high_water[R_D_CHANNEL] == "100000000000000001"
+
+
+async def test_resend_header_reports_slowmode_and_keeps_export_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repair header reports its wait and ordinary resend keeps its source name."""
+    from discord_ferry.migrator.delivery import DeliveryResult
+    from discord_ferry.state import DeliveryToken
+
+    channel_id = valid_stoat_id(9510)
+    export = _export_for("100", name="forum-post", ch_type=15)
+    export.is_thread = True
+    export.parent_channel_name = "forum"
+    export.messages = [_text_msg("20", "body", "2024-01-15T12:00:00+00:00")]
+    config = _make_config(tmp_path, output_dir=tmp_path, upload_delay=0)
+    state = MigrationState(channel_map={"100": channel_id})
+    events: list[MigrationEvent] = []
+
+    async def deliver_header(*, on_slowmode_wait=None, **_kwargs):
+        assert on_slowmode_wait is not None
+        await on_slowmode_wait(29)
+        return DeliveryResult(
+            valid_stoat_id(9511),
+            (),
+            DeliveryToken("4" * 64, "5" * 64),
+            True,
+            False,
+        )
+
+    process = AsyncMock(return_value=True)
+    monkeypatch.setattr(engine_module, "deliver_part", deliver_header)
+    monkeypatch.setattr(engine_module, "_process_message", process)
+
+    async with aiohttp.ClientSession() as session:
+        assert (
+            await engine_module._resend_channel(session, config, state, export, events.append) == 1
+        )
+
+    assert process.await_args.kwargs["source_channel_name"] == "forum-post"
+    assert [
+        (event.phase, event.status, event.channel_name, event.detail)
+        for event in events
+        if event.status == "notice"
+    ] == [
+        (
+            "repair",
+            "notice",
+            "forum-post",
+            {"kind": "slowmode_wait", "retry_after_seconds": 29},
+        )
+    ]
+
+
+async def test_repair_tail_passes_export_name_to_message_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A direct tail repair keeps its exported channel name for a slowmode notice."""
+    channel_id = valid_stoat_id(9520)
+    export = _export_for("100", name="restored-channel")
+    export.messages = [_text_msg("20", "body", "2024-01-15T12:00:00+00:00")]
+    config = _make_config(tmp_path, output_dir=tmp_path)
+    state = MigrationState(channel_map={"100": channel_id}, channel_high_water={"100": "20"})
+    process = AsyncMock(return_value=True)
+    monkeypatch.setattr(engine_module, "_process_message", process)
+
+    async with aiohttp.ClientSession() as session:
+        assert await engine_module._repair_tail(
+            session,
+            config,
+            state,
+            CheckResult("tail:100", "fail", "tail_absent", "missing", "100", channel_id),
+            [export],
+            lambda _event: None,
+        )
+
+    assert process.await_args.kwargs["source_channel_name"] == "restored-channel"
 
 
 R_NEW_CHANNEL = valid_stoat_id(9500)
