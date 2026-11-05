@@ -6174,6 +6174,47 @@ def _register_forum_index_channels(m: aioresponses, index_send_status: int) -> N
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_forum_index_slowmode_wait_reports_channel_context(
+    channel_attributes_only, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The initial forum index gives its typed cooldown the channels context."""
+    from discord_ferry.migrator.delivery import DeliveryResult
+    from discord_ferry.state import DeliveryToken
+
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, upload_delay=0)
+    state = MigrationState(stoat_server_id="srv1")
+
+    async def deliver_index(*, on_slowmode_wait, **_kwargs):
+        await on_slowmode_wait(29)
+        return DeliveryResult(
+            "01J5T000000000000000002001",
+            (),
+            DeliveryToken("0" * 64, "1" * 64),
+            True,
+            False,
+        )
+
+    monkeypatch.setattr(structure_module, "deliver_part", deliver_index)
+    with aioresponses() as remote:
+        _register_forum_index_channels(remote, 200)
+        await run_channels(config, state, _forum_index_exports(), events.append)
+
+    assert [
+        (event.phase, event.status, event.channel_name, event.detail)
+        for event in events
+        if event.status == "notice"
+    ] == [
+        (
+            "channels",
+            "notice",
+            "my-forum-index",
+            {"kind": "slowmode_wait", "retry_after_seconds": 29},
+        )
+    ]
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
 @pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forum_index_create_conflict_remains_unresolved(
     channel_attributes_only, tmp_path: Path
