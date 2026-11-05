@@ -2589,6 +2589,11 @@ async def test_message_slowmode_wait_rejects_second_cooldown(
         (502, {"type": "InternalError"}),
         (409, {"type": "DuplicateNonce"}),
         (403, {"type": "MissingPermission", "permission": "ManageMessages"}),
+        (403, {"type": "MissingPermission", "permission": "MentionRoles", "extra": True}),
+        (403, {"type": "MissingPermission", "permission": "MentionRoles", "location": 1}),
+        (403, {"type": "MissingPermission", "permission": {}}),
+        (403, {"type": "MissingPermission", "permission": []}),
+        (403, {"type": "Other", "permission": "MentionRoles"}),
         (400, {"type": "UnknownError"}),
         (200, {"unexpected": "success"}),
         (201, {"_id": "invalid"}),
@@ -2621,13 +2626,14 @@ async def test_message_recovery_uncertain_response_never_reposts(
     assert sum(len(calls) for calls in mock_aiohttp.requests.values()) == 1
 
 
-async def test_message_recovery_confirmed_send_permission_rejection(
-    mock_aiohttp: aioresponses,
+@pytest.mark.parametrize("permission", ["SendMessage", "MentionRoles"])
+async def test_message_recovery_confirmed_message_permission_rejection(
+    mock_aiohttp: aioresponses, permission: str
 ) -> None:
     mock_aiohttp.post(
         f"{BASE_URL}/channels/ch1/messages",
         status=403,
-        payload={"type": "MissingPermission", "permission": "SendMessage"},
+        payload={"type": "MissingPermission", "permission": permission},
     )
     hook = AsyncMock()
     async with aiohttp.ClientSession() as session:
