@@ -53,7 +53,7 @@ from discord_ferry.migrator.api import (
     api_upsert_categories,
     get_session,
 )
-from discord_ferry.migrator.delivery import deliver_part
+from discord_ferry.migrator.delivery import deliver_part, slowmode_wait_handler
 from discord_ferry.migrator.sanitize import truncate_name
 from discord_ferry.migrator.verify import read_permission_context, verify_permission_channel
 from discord_ferry.parser.dce_parser import stream_messages
@@ -1794,6 +1794,9 @@ async def run_channels(
                     content=content,
                     masquerade={"name": "Discord Ferry"},
                     allow_rejected_retry=config.incremental,
+                    on_slowmode_wait=slowmode_wait_handler(
+                        config, on_event, phase="channels", channel_name=index_name
+                    ),
                 )
                 index_msg_id = delivery.message_id
                 await asyncio.sleep(config.upload_delay)
