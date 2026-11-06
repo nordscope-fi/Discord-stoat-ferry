@@ -97,6 +97,83 @@ async def fetch_guild_channels(
     return [_parse_channel(c) for c in data]
 
 
+def _source_id(value: object) -> str | None:
+    if isinstance(value, str) and value.isascii() and value.isdecimal() and int(value) > 0:
+        return value
+    return None
+
+
+async def _thread_page_ids(
+    session: aiohttp.ClientSession, token: str, path: str
+) -> tuple[tuple[str, ...], bool]:
+    """Read paginated thread objects and refuse malformed or non-progressing pages."""
+    ids: set[str] = set()
+    offset = 0
+    while True:
+        separator = "&" if "?" in path else "?"
+        data = await _discord_get_object(
+            session, token, f"{path}{separator}limit=100&offset={offset}"
+        )
+        threads = data.get("threads")
+        if not isinstance(threads, list):
+            return (), False
+        page_ids: list[str] = []
+        for thread in threads:
+            if not isinstance(thread, dict) or (thread_id := _source_id(thread.get("id"))) is None:
+                return (), False
+            page_ids.append(thread_id)
+        ids.update(page_ids)
+        if data.get("has_more") is not True:
+            return tuple(sorted(ids)), data.get("has_more") is False
+        if not page_ids:
+            return (), False
+        next_offset = offset + len(page_ids)
+        if next_offset <= offset:
+            return (), False
+        offset = next_offset
+
+
+async def fetch_export_source_ids(
+    session: aiohttp.ClientSession, token: str, guild_id: str
+) -> tuple[tuple[str, ...], bool]:
+    """Return current regular-channel and active or archived thread IDs for an export."""
+    if _source_id(guild_id) is None:
+        return (), False
+    channels = await _discord_get(session, token, f"/guilds/{guild_id}/channels")
+    parent_ids: list[str] = []
+    for channel in channels:
+        if not isinstance(channel, dict) or (channel_id := _source_id(channel.get("id"))) is None:
+            return (), False
+        parent_ids.append(channel_id)
+    source_ids = set(parent_ids)
+    if token.startswith("Bot "):
+        active = await _discord_get_object(session, token, f"/guilds/{guild_id}/threads/active")
+        threads = active.get("threads")
+        if not isinstance(threads, list):
+            return (), False
+        for thread in threads:
+            if not isinstance(thread, dict) or (thread_id := _source_id(thread.get("id"))) is None:
+                return (), False
+            source_ids.add(thread_id)
+    for parent_id in parent_ids:
+        if not token.startswith("Bot "):
+            for archived in ("false", "true"):
+                thread_ids, complete = await _thread_page_ids(
+                    session, token, f"/channels/{parent_id}/threads/search?archived={archived}"
+                )
+                if not complete:
+                    return (), False
+                source_ids.update(thread_ids)
+        for kind in ("public", "private"):
+            thread_ids, complete = await _thread_page_ids(
+                session, token, f"/channels/{parent_id}/threads/archived/{kind}"
+            )
+            if not complete:
+                return (), False
+            source_ids.update(thread_ids)
+    return tuple(sorted(source_ids)), True
+
+
 async def fetch_channel(
     session: aiohttp.ClientSession, token: str, channel_id: str
 ) -> DiscordChannel:
