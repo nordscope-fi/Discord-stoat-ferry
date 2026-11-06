@@ -20,6 +20,28 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.nicegui_main_file("tests/nicegui_app.py")
 
 
+async def test_gui_renders_engine_bounded_export_event(
+    user, monkeypatch, user_store, tab_store, tmp_path
+):
+    from discord_ferry import gui
+    from discord_ferry.core.events import MigrationEvent
+    from discord_ferry.state import MigrationState
+
+    async def migration(config, *, on_event):
+        on_event(MigrationEvent("export", "notice", "Using bounded export with proven coverage"))
+        return MigrationState()
+
+    user_store.update(
+        {"export_dir": str(tmp_path), "output_dir": str(tmp_path), "stoat_url": "https://api.test"}
+    )
+    tab_store.update({"token": "target-token", "discord_token": "source-token"})
+    monkeypatch.setattr(gui, "run_migration", migration)
+
+    await user.open("/migrate")
+
+    await user.should_see("Using bounded export with proven coverage")
+
+
 @pytest.mark.parametrize("effects", ["none_confirmed", "changes_confirmed", "changes_possible"])
 async def test_migration_permission_stop_never_exposes_early_completion(
     user, tmp_path, user_store, tab_store, monkeypatch, effects
