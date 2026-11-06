@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.5.0] - 2026-11-06
+
+### Added
+
+- Migrate a public or announcement thread only after Ferry proves its parent access, age restriction, active unlocked state, and equal thread-send access. Private, member-specific, incomplete, and unequal cases stop before a destination effect (#1173).
+
 ## [3.4.0] - 2026-11-06
 
 ### Added
