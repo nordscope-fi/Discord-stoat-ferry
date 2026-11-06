@@ -82,6 +82,7 @@ Below these, three labelled groups hold the tuning settings (since v2.7.0):
 |--------|---------|-------------|
 | Checkpoint interval | 50 | How often migration state is saved (every N messages). Lower = safer but more disk I/O. |
 | Validate after migration | Off | After migration, fetch the server and compare channel/role counts against expectations. |
+| Incremental | Off | Reuse a prior migration and send new messages. Ferry requests a shorter export only after it proves current coverage; otherwise it runs a full export. Cannot be combined with Resume. |
 
 !!! tip "Running into 'Too Many Requests' errors?"
     That error (code 429) means Stoat is asking Ferry to slow down. Increase the rate limit slider to 2.0 or 3.0 seconds. This slows the migration but eliminates the errors.
@@ -243,6 +244,27 @@ The 13 phases are shown in order, with a checkmark as each completes:
 11. **Reactions**, add message reactions (or, in the default `text` mode, no-op because reaction summaries were appended during Messages)
 12. **Pins**, pin messages
 13. **Report**, write summary report with post-migration checklist
+
+### How incremental export decisions appear
+
+When **Incremental** is selected under **Advanced Options > Safety**, the **Export** phase in the
+Migrate screen's live log shows one of these notices:
+
+- `Using bounded export with proven coverage` means Ferry proved that every current source and
+  saved retry remains inside the requested range.
+- `Using full export because current coverage is incomplete` means Ferry could not prove that a
+  shorter export would be complete. The migration can continue with a full export.
+
+Ferry writes 1-Click incremental results to Ferry-owned stages and checks them before any Stoat
+changes. If a bounded result is unreadable, reports a failed channel, or does not match the current
+source set, Ferry discards it and makes one fresh full export. A full export with valid files can
+still report failed channels. Ferry warns and migrates those available files, but the partial result
+cannot authorize a shorter later run or media reuse.
+
+Media reuse is limited to a completed full export that still passes the server, metadata, failure,
+and freshness checks. Choosing **Resume** after an interrupted 1-Click migration starts another
+export before continuing. Offline mode keeps reading the selected export folder; Ferry does not
+move, replace, or delete those files.
 
 ### Progress Bar
 

@@ -86,7 +86,7 @@ ferry migrate --export-dir ./export \
 
 ---
 
-## Incremental Migration
+## How incremental exports stay complete
 
 For active servers where new messages arrive between migration runs:
 
@@ -94,19 +94,37 @@ For active servers where new messages arrive between migration runs:
 ferry migrate --incremental --stoat-url ...
 ```
 
-Incremental mode:
+Incremental mode reuses the prior migration state. For supported, permission-verified channels and
+active public threads, it sends messages after each saved checkpoint and keeps saved failed-message
+retries inside the export range. It fully migrates newly found supported sources and reports both
+new and cumulative statistics.
 
-- Loads the prior completed state (`state.json` + `message_map.json`) from the output directory
-- Only migrates messages newer than the last completed run per channel
-- New channels since the last run are fully migrated
-- Cumulative stats shown in the report alongside delta stats
+Before a 1-Click incremental run, Ferry reads the current channels and threads. It requests a
+shorter export only when every current source has a usable migration marker, saved retry data is
+valid, and a previously accepted full export still proves complete coverage. The CLI and GUI show
+`Using bounded export with proven coverage` when these checks pass. If Ferry cannot prove coverage,
+it runs a full export and shows `Using full export because current coverage is incomplete`.
 
-**Requirements:** A prior completed migration in the same output directory.
+Ferry validates the shorter export before it changes the Stoat server. If the export is unreadable,
+reports a failed channel, or does not match the current source set, Ferry discards it and runs one
+fresh full export. A full export can still contain valid files when DiscordChatExporter (DCE) reports
+that some channels failed. Ferry warns about those failures and migrates the available files, but
+the partial result cannot authorize a shorter later run.
 
-**Cannot be combined with `--resume`**; these are mutually exclusive. Use `--resume` for crashed migrations; use `--incremental` for delta updates of a successfully completed migration.
+Ferry keeps 1-Click incremental results in Ferry-owned stages. It reuses media only from a completed
+full export that still passes its server, metadata, failure, and freshness checks. Bounded and
+partial exports never authorize media reuse.
+
+A prior completed migration in the same output directory is needed for a shorter export. Without
+one, incremental mode uses a full export. `--incremental` and `--resume` cannot be combined. An
+interrupted 1-Click migration exports again when it resumes. Offline migrations keep reading the
+folder you selected; Ferry does not move, replace, or delete that input.
 
 !!! info "message_map.json"
-    As of v2.0.0, the message ID map is stored as a separate `message_map.json` file alongside `state.json`. Both files must be present in the output directory for `--incremental` or `--resume` to work correctly. Do not delete either file until you are satisfied the migration is complete.
+    As of v2.0.0, the message ID map is stored as a separate `message_map.json` file alongside
+    `state.json`. Both files must be present in the output directory for `--incremental` or
+    `--resume` to work correctly. Do not delete either file until you are satisfied the migration
+    is complete.
 
 ---
 

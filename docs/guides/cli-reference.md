@@ -68,6 +68,29 @@ ferry migrate [OPTIONS]
 !!! info "Mode selection"
     Provide either `--discord-token` + `--discord-server` (orchestrated mode) or `--export-dir` (offline mode). You cannot use both.
 
+### What incremental export notices mean
+
+In orchestrated `--incremental` mode, Ferry reads the current Discord channels and threads before
+starting DiscordChatExporter (DCE). The export notice names the decision:
+
+- `Using bounded export with proven coverage` means Ferry proved that every current source and
+  saved retry remains inside the requested range.
+- `Using full export because current coverage is incomplete` means Ferry could not prove that a
+  shorter export would be complete. The migration can continue with a full export.
+
+Ferry writes orchestrated incremental results to Ferry-owned stages and validates them before any
+Stoat changes. If a bounded result is unreadable, reports a failed channel, or does not match the
+current source set, Ferry discards it and makes one fresh full export. If that full export contains
+valid files but reports failed channels, Ferry warns and migrates the available files. The partial
+result cannot authorize a shorter later run.
+
+Media reuse is limited to a completed full export that still passes the server, metadata, failure,
+and freshness checks. Bounded and partial exports do not authorize reuse.
+
+`--incremental` and `--resume` cannot be combined. An orchestrated resume runs DCE again before the
+migration continues. Offline mode keeps reading the directory supplied with `--export-dir`; Ferry
+does not move, replace, or delete those files.
+
 ### Options
 
 | Flag | Environment Variable | Default | Description |
