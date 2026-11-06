@@ -161,11 +161,23 @@ class SourceChannel:
     overwrites: tuple[SourceOverwrite, ...] | None = None
     member_overwrite_count: int | None = None
     capture_fields: frozenset[str] = frozenset()
+    parent_id: str | None = field(default=None, kw_only=True)
+    thread_archived: bool | None = field(default=None, kw_only=True)
+    thread_locked: bool | None = field(default=None, kw_only=True)
+    nsfw: bool | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         _identity(self.id)
         _integer(self.type, "channel type", unknown=True)
         _integer(self.member_overwrite_count, "member overwrite count", unknown=True)
+        if self.parent_id is not None:
+            _identity(self.parent_id)
+        if self.thread_archived is not None and type(self.thread_archived) is not bool:
+            raise ValueError("thread_archived must be Boolean or unknown")
+        if self.thread_locked is not None and type(self.thread_locked) is not bool:
+            raise ValueError("thread_locked must be Boolean or unknown")
+        if self.nsfw is not None and type(self.nsfw) is not bool:
+            raise ValueError("nsfw must be Boolean or unknown")
         if self.overwrites is not None:
             _records(self.overwrites, SourceOverwrite)
         _immutable(self.capture_fields, frozenset)

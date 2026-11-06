@@ -16,6 +16,7 @@ from discord_ferry.discord.client import (
     _parse_channel,
     _parse_role,
     download_role_icon,
+    fetch_channel,
     fetch_guild_channels,
     fetch_guild_roles,
 )
@@ -74,6 +75,26 @@ def test_omitted_overwrites_are_not_verified_empty() -> None:
     assert getattr(omitted, "capture_fields", None) == frozenset({"id", "name", "type"})
     assert explicit.capture_fields == frozenset({"id", "name", "type", "permission_overwrites"})
     assert omitted.permission_overwrites == explicit.permission_overwrites == []
+
+
+def test_parse_channel_keeps_public_thread_parent_and_lifecycle_presence() -> None:
+    channel = _parse_channel(
+        {
+            "id": "100000000000000011",
+            "guild_id": "100000000000000001",
+            "name": "public",
+            "type": 11,
+            "parent_id": "100000000000000010",
+            "thread_metadata": {"archived": False, "locked": False},
+        }
+    )
+    assert channel.parent_id == "100000000000000010"
+    assert channel.thread_archived is False and channel.thread_locked is False
+    assert {
+        "parent_id",
+        "thread_metadata.archived",
+        "thread_metadata.locked",
+    } <= channel.capture_fields
 
 
 def test_role_defaults_do_not_prove_capture() -> None:
@@ -265,6 +286,26 @@ async def test_fetch_guild_channels_parses_nsfw_and_overwrites(
     assert channels[1].nsfw is True
     assert len(channels[1].permission_overwrites) == 1
     assert channels[1].permission_overwrites[0].allow == 4194304  # Parsed from string
+
+
+async def test_fetch_channel_parses_thread_identity(mock_discord: aioresponses) -> None:
+    channel_id = "thread1"
+    mock_discord.get(
+        f"{DISCORD_API}/channels/{channel_id}",
+        payload={
+            "id": channel_id,
+            "guild_id": GUILD_ID,
+            "name": "thread",
+            "type": 11,
+            "parent_id": "parent1",
+            "thread_metadata": {"archived": False, "locked": False},
+        },
+    )
+    async with aiohttp.ClientSession() as session:
+        channel = await fetch_channel(session, TOKEN, channel_id)
+    assert channel.guild_id == GUILD_ID
+    assert channel.parent_id == "parent1"
+    assert channel.thread_archived is False and channel.thread_locked is False
 
 
 async def test_fetch_guild_roles_401_raises_discord_auth_error(
