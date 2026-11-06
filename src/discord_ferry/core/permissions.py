@@ -455,20 +455,23 @@ def _form_source_bit(
     return BitPredicate(allows, denies, grants, c)
 
 
-def build_source_predicates(
+_ORDINARY_GUILD_CHANNEL_TYPES = frozenset({0, 2, 4, 5, 13, 15, 16})
+
+
+def _form_checked_predicates(
     source: PermissionSourceEvidence,
-    channel_id: str,
+    evidence_channel: SourceChannel,
     role_ids: tuple[str, ...],
     bits: tuple[int, ...],
+    reported_child_id: str,
 ) -> tuple[tuple[tuple[int, BitPredicate], ...], tuple[PermissionProblem, ...]]:
-    """Form raw source bits or refuse, without target encoding or readiness.
+    """Form checked predicates from one proved ordinary overwrite table.
 
-    The metadata owner validates snapshot binding before calculation. This
-    boundary additionally requires complete structural inputs and an exact
-    ordered universe of ordinary roles, excluding everyone and managed roles.
-    Implicit dependencies and target compatibility belong to plan compilation.
+    A public thread calls this with its ordinary parent and reports all failures
+    against the child, so neither a child overwrite table nor its identity can
+    become an authority substitute for the proved parent.
     """
-    entities: tuple[str, ...] = ()
+    entities = (reported_child_id,)
 
     def refuse(
         reason: ProblemReason, guidance: str
@@ -476,8 +479,7 @@ def build_source_predicates(
         return (), (PermissionProblem(reason, entities, None, guidance),)
 
     try:
-        _identity(channel_id)
-        entities = (channel_id,)
+        _identity(reported_child_id)
         _immutable(role_ids)
         _ids(role_ids)
         _immutable(bits)
@@ -501,25 +503,20 @@ def build_source_predicates(
     ordinary = {role.id for role in source.roles if role.id != source.guild_id and not role.managed}
     if set(role_ids) != ordinary:
         return refuse("unverified", "Bind every ordinary source role exactly once")
-    channels = tuple(channel for channel in source.channels if channel.id == channel_id)
-    if len(channels) != 1 or channel_id not in source.covered_channel_ids:
-        return refuse("unverified", "Refresh unique evidence covering the selected channel")
-    channel = channels[0]
     if (
-        channel.type is None
-        or channel.overwrites is None
-        or channel.member_overwrite_count is None
-        or not {"type", "permission_overwrites"} <= channel.capture_fields
+        evidence_channel.type is None
+        or evidence_channel.overwrites is None
+        or evidence_channel.member_overwrite_count is None
+        or not {"type", "permission_overwrites"} <= evidence_channel.capture_fields
     ):
         return refuse("unverified", "Refresh complete raw channel permission facts")
-    overwrites = {overwrite.role_id: overwrite for overwrite in channel.overwrites}
-    if len(overwrites) != len(channel.overwrites) or not overwrites.keys() <= roles_by_id.keys():
+    overwrites = {overwrite.role_id: overwrite for overwrite in evidence_channel.overwrites}
+    if (
+        len(overwrites) != len(evidence_channel.overwrites)
+        or not overwrites.keys() <= roles_by_id.keys()
+    ):
         return refuse("unverified", "Refresh unique overwrites bound to known source roles")
-    # Discord channel resource: ordinary guild overwrite scopes, not threads,
-    # direct messages or directory channels. Never infer parent/member access.
-    if channel.type not in {0, 2, 4, 5, 13, 15, 16}:
-        return refuse("unsupported", "This source channel scope has no exact supported model")
-    if channel.member_overwrite_count:
+    if evidence_channel.member_overwrite_count:
         return refuse("unsupported", "Member-specific source overwrites cannot be reproduced")
     managed = tuple(role for role in source.roles if role.id != source.guild_id and role.managed)
     roles = tuple(roles_by_id[role_id] for role_id in role_ids) + managed
@@ -532,7 +529,7 @@ def build_source_predicates(
                 return (), (
                     PermissionProblem(
                         "unsupported",
-                        (channel_id, role.id),
+                        (reported_child_id, role.id),
                         bit,
                         "A managed source role changes access without an exact target mapping",
                     ),
@@ -549,6 +546,170 @@ def build_source_predicates(
             )
         )
     return tuple(pairs), ()
+
+
+def build_source_predicates(
+    source: PermissionSourceEvidence,
+    channel_id: str,
+    role_ids: tuple[str, ...],
+    bits: tuple[int, ...],
+) -> tuple[tuple[tuple[int, BitPredicate], ...], tuple[PermissionProblem, ...]]:
+    """Form raw source bits for one ordinary guild overwrite scope."""
+    try:
+        _identity(channel_id)
+    except ValueError:
+        return (), (
+            PermissionProblem(
+                "unverified", (), None, "Supply valid channel, role and permission selections"
+            ),
+        )
+    channels = tuple(channel for channel in source.channels if channel.id == channel_id)
+    if len(channels) != 1 or channel_id not in source.covered_channel_ids:
+        return (), (
+            PermissionProblem(
+                "unverified",
+                (channel_id,),
+                None,
+                "Refresh unique evidence covering the selected channel",
+            ),
+        )
+    channel = channels[0]
+    if channel.type is None:
+        return _form_checked_predicates(source, channel, role_ids, bits, channel_id)
+    if channel.type not in _ORDINARY_GUILD_CHANNEL_TYPES:
+        return (), (
+            PermissionProblem(
+                "unsupported",
+                (channel_id,),
+                None,
+                "This source channel scope has no exact supported model",
+            ),
+        )
+    return _form_checked_predicates(source, channel, role_ids, bits, channel_id)
+
+
+def resolve_public_thread_scope(
+    source: PermissionSourceEvidence, child_id: str, role_ids: tuple[str, ...]
+) -> tuple[str, tuple[tuple[int, BitPredicate], ...], tuple[PermissionProblem, ...]]:
+    """Bind an active public thread to its exact ordinary parent, or refuse."""
+
+    def refuse(
+        guidance: str,
+    ) -> tuple[str, tuple[tuple[int, BitPredicate], ...], tuple[PermissionProblem, ...]]:
+        return "", (), (PermissionProblem("unverified", (child_id,), None, guidance),)
+
+    children = tuple(channel for channel in source.channels if channel.id == child_id)
+    if len(children) != 1 or child_id not in source.covered_channel_ids:
+        return (
+            "",
+            (),
+            (PermissionProblem("unverified", (child_id,), None, "Refresh public thread facts"),),
+        )
+    child = children[0]
+    if (
+        child.type not in {10, 11}
+        or child.parent_id is None
+        or child.thread_archived is not False
+        or child.thread_locked is not False
+        or not {
+            "type",
+            "parent_id",
+            "thread_metadata.archived",
+            "thread_metadata.locked",
+        }
+        <= child.capture_fields
+    ):
+        return refuse("Refresh an eligible active, unlocked public thread")
+    parents = tuple(parent for parent in source.channels if parent.id == child.parent_id)
+    if (
+        len(parents) != 1
+        or parents[0].id not in source.covered_channel_ids
+        or parents[0].type not in _ORDINARY_GUILD_CHANNEL_TYPES
+        or parents[0].nsfw is None
+        or "nsfw" not in parents[0].capture_fields
+    ):
+        return refuse("Refresh one ordinary parent scope")
+    parent = parents[0]
+    inherited_send, inherited_problems = _form_checked_predicates(
+        source, parent, role_ids, (38,), child_id
+    )
+    parent_send, parent_problems = _form_checked_predicates(
+        source, parent, role_ids, (11,), child_id
+    )
+    if inherited_problems:
+        return "", (), inherited_problems
+    if parent_problems:
+        return "", (), parent_problems
+    if inherited_send[0][1] != parent_send[0][1]:
+        return (
+            "",
+            (),
+            (
+                PermissionProblem(
+                    "unsupported", (child_id,), None, "Thread send access differs from parent"
+                ),
+            ),
+        )
+    predicates, problems = _form_checked_predicates(
+        source, parent, role_ids, tuple(_permission_mapping()), child_id
+    )
+    return (parent.id, predicates, problems) if not problems else ("", (), problems)
+
+
+def _resolve_selected_predicates(
+    source: PermissionSourceEvidence, layout: TargetLayout
+) -> tuple[dict[str, tuple[tuple[int, BitPredicate], ...]], tuple[PermissionProblem, ...]]:
+    """Resolve every selected child to proved raw predicates without changing its key."""
+    ordered = _calculation_roles(layout)
+    bits = tuple(_permission_mapping())
+    resolved: dict[str, tuple[tuple[int, BitPredicate], ...]] = {}
+    for source_id, _target_id in layout.planned_channels:
+        channels = tuple(channel for channel in source.channels if channel.id == source_id)
+        if len(channels) != 1:
+            return {}, (
+                PermissionProblem(
+                    "unverified", (source_id,), None, "Refresh unique selected channels"
+                ),
+            )
+        channel = channels[0]
+        if channel.type in _ORDINARY_GUILD_CHANNEL_TYPES:
+            _, problems = build_source_predicates(source, source_id, ordered, (10,))
+            if problems:
+                return {}, problems
+            source_roles = {role.id: role for role in source.roles}
+            managed = tuple(
+                sorted(
+                    (role for role in source.roles if role.id != source.guild_id and role.managed),
+                    key=lambda role: role.id,
+                )
+            )
+            roles = tuple(source_roles[role_id] for role_id in ordered) + managed
+            assert channel.overwrites is not None
+            overwrites = {overwrite.role_id: overwrite for overwrite in channel.overwrites}
+            predicates = tuple(
+                (
+                    bit,
+                    _form_source_bit(source_roles[source.guild_id], roles, overwrites, bit),
+                )
+                for bit in bits
+            )
+        else:
+            _parent_id, predicates, problems = resolve_public_thread_scope(
+                source, source_id, ordered
+            )
+        if channel.type not in _ORDINARY_GUILD_CHANNEL_TYPES and problems:
+            return {}, problems
+        if channel.type in {2, 4, 13}:
+            return {}, (
+                PermissionProblem(
+                    "unsupported",
+                    (source_id,),
+                    None,
+                    "This source scope needs additional category or live voice evidence",
+                ),
+            )
+        resolved[source_id] = predicates
+    return resolved, ()
 
 
 @dataclass(frozen=True)
@@ -789,22 +950,14 @@ def validate_calculation_inputs(
         or not set(target_channels) <= channels.keys()
     ):
         return refuse("unverified", "Read unique actual target channel bindings")
-    ordered = _calculation_roles(layout)
     mapping = _permission_mapping()
     affected = sum(1 << target for target in {bit for values in mapping.values() for bit in values})
     target_problems = _target_effect_problems(layout, affected)
     if target_problems:
         return target_problems
-    for sid in selected:
-        _, problems = build_source_predicates(source, sid, ordered, (10,))
-        if problems:
-            return problems
-        if raw_channels[sid].type in {2, 4, 13}:
-            return refuse(
-                "unsupported",
-                "This source scope needs additional category or live voice evidence",
-                sid,
-            )
+    _, predicate_problems = _resolve_selected_predicates(source, layout)
+    if predicate_problems:
+        return predicate_problems
     from discord_ferry.discord.permissions import translate_permissions
 
     for sid, planned_role in future.items():
@@ -910,6 +1063,9 @@ def compile_supported_bits(
     problems = validate_calculation_inputs(source, layout)
     if problems:
         return PermissionPlan.refused(problems)
+    predicates_by_sid, predicate_problems = _resolve_selected_predicates(source, layout)
+    if predicate_problems:
+        return PermissionPlan.refused(predicate_problems)
     mapping = _permission_mapping()
     affected = sum(
         1 << bit for bit in {target for targets in mapping.values() for target in targets}
@@ -935,16 +1091,9 @@ def compile_supported_bits(
     roles = tuple(source_roles[sid] for sid in ordered) + managed
     all_roles = (1 << len(roles)) - 1
     observed = {c.id: c for c in layout.channels}
-    raw_channels = {c.id: c for c in source.channels}
     channels: list[ChannelPermissionPlan] = []
     for sid, target in layout.planned_channels:
-        raw_channel = raw_channels[sid]
-        assert raw_channel.overwrites is not None
-        overwrites = {o.role_id: o for o in raw_channel.overwrites}
-        predicates = {
-            bit: _form_source_bit(source_roles[source.guild_id], roles, overwrites, bit)
-            for bit in mapping
-        }
+        predicates = dict(predicates_by_sid[sid])
         view = predicates[10]
         old = (
             observed[target] if target is not None else TargetChannel(sid, PermissionCell(0, 0), ())
