@@ -71,7 +71,14 @@ from discord_ferry.exporter import (
 )
 from discord_ferry.exporter.inventory import ExportDecision, SourceInventory, select_export_decision
 from discord_ferry.exporter.runner import ExportRequest
-from discord_ferry.exporter.staging import create_stage, inspect_stage
+from discord_ferry.exporter.staging import (
+    accept_stage,
+    create_stage,
+    discard_candidate,
+    inspect_stage,
+    seed_stage_media,
+    validate_coverage,
+)
 from discord_ferry.migrator.api import (
     api_create_channel,
     api_create_invite,
@@ -420,6 +427,7 @@ def _export_media_reuse_policy(
     previous_export_completed: bool,
     previous_export_had_channel_failures: bool,
     previous_export_started_at: str,
+    validated_stage: Path | None = None,
 ) -> tuple[bool, str | None]:
     """Decide whether DCE may trust files already in its media folder."""
     if not previous_export_completed:
@@ -430,9 +438,10 @@ def _export_media_reuse_policy(
         return False, "the saved export cannot be tied to a Discord server"
 
     expected_export_dir = config.output_dir / "dce_cache" / config.discord_server_id
-    if config.export_dir.resolve() != expected_export_dir.resolve():
+    candidate_dir = validated_stage if validated_stage is not None else config.export_dir
+    if validated_stage is None and candidate_dir.resolve() != expected_export_dir.resolve():
         return False, "the selected export folder is not Ferry's cache for this Discord server"
-    if not config.export_dir.is_dir():
+    if not candidate_dir.is_dir():
         return False, "the previously completed export folder no longer exists"
 
     cached = read_cached_metadata(
@@ -494,6 +503,42 @@ def _has_complete_full_witness(
     except (ExportError, StateError):
         return False
     return actual.source_ids == witness.source_ids and actual.digest == witness.digest
+
+
+def _media_seed_source(
+    state: MigrationState,
+    config: FerryConfig,
+    previous_completed: bool,
+    previous_failed_channels: bool,
+    previous_started_at: str,
+) -> tuple[Path | None, str | None]:
+    """Choose only a verified complete full stage, or the existing legacy cache."""
+    witness = state.staged_input
+    if witness is not None:
+        if witness.scope != "full" or not witness.input_valid or not witness.coverage_complete:
+            return None, "the prior staged export is not a complete full export"
+        try:
+            source = state.validated_stage_path(config.output_dir)
+            actual = inspect_stage(source, config.output_dir, "full")
+        except (ExportError, StateError):
+            return None, "the prior staged export cannot be validated"
+        if actual.source_ids != witness.source_ids or actual.digest != witness.digest:
+            return None, "the prior staged export changed after acceptance"
+        policy_ok, reason = _export_media_reuse_policy(
+            config,
+            previous_export_completed=previous_completed,
+            previous_export_had_channel_failures=previous_failed_channels,
+            previous_export_started_at=previous_started_at,
+            validated_stage=source,
+        )
+        return (source, None) if policy_ok else (None, reason)
+    policy_ok, reason = _export_media_reuse_policy(
+        config,
+        previous_export_completed=previous_completed,
+        previous_export_had_channel_failures=previous_failed_channels,
+        previous_export_started_at=previous_started_at,
+    )
+    return (config.export_dir, None) if policy_ok else (None, reason)
 
 
 async def run_migration(
@@ -816,12 +861,21 @@ async def run_migration(
             active_export_dir = create_stage(config.output_dir, uuid.uuid4().hex)
             on_event(MigrationEvent("export", "notice", _decision_message(decision)))
 
-        reuse_media, reuse_media_reason = _export_media_reuse_policy(
+        seed_source, reuse_media_reason = _media_seed_source(
+            state,
             config,
-            previous_export_completed=previous_export_completed,
-            previous_export_had_channel_failures=previous_export_had_channel_failures,
-            previous_export_started_at=previous_export_started_at,
+            previous_export_completed,
+            previous_export_had_channel_failures,
+            previous_export_started_at,
         )
+        reuse_media = False
+        if seed_source is not None:
+            if active_export_dir == config.export_dir:
+                reuse_media = True
+            else:
+                reuse_media = seed_stage_media(seed_source, active_export_dir, eligible=True)
+                if not reuse_media:
+                    reuse_media_reason = "stage media is unavailable"
         if export_checkpoint_state is not None:
             export_checkpoint_state.export_completed = False
             save_state(export_checkpoint_state, config.output_dir)
@@ -834,25 +888,81 @@ async def run_migration(
             reuse_media,
         )
         if reuse_media:
-            await run_dce_export(
-                effective_config,
-                dce_path,
-                record_export_event,
-                reuse_media=True,
-                request=request,
-            )
+            if config.incremental:
+                await run_dce_export(
+                    effective_config,
+                    dce_path,
+                    record_export_event,
+                    reuse_media=True,
+                    request=request,
+                )
+            else:
+                await run_dce_export(
+                    effective_config, dce_path, record_export_event, reuse_media=True
+                )
         elif reuse_media_reason is not None:
-            await run_dce_export(
-                effective_config,
-                dce_path,
-                record_export_event,
-                reuse_media_reason=reuse_media_reason,
-                request=request,
+            if config.incremental:
+                await run_dce_export(
+                    effective_config,
+                    dce_path,
+                    record_export_event,
+                    reuse_media_reason=reuse_media_reason,
+                    request=request,
+                )
+            else:
+                await run_dce_export(
+                    effective_config,
+                    dce_path,
+                    record_export_event,
+                    reuse_media_reason=reuse_media_reason,
+                )
+        else:
+            if config.incremental:
+                await run_dce_export(
+                    effective_config, dce_path, record_export_event, request=request
+                )
+            else:
+                await run_dce_export(effective_config, dce_path, record_export_event)
+        if config.incremental:
+            try:
+                witness = inspect_stage(active_export_dir, config.output_dir, decision.scope)
+                coverage_complete = not export_had_channel_failures and validate_coverage(
+                    witness, decision.expected_ids
+                )
+            except ExportError:
+                if decision.scope == "full":
+                    raise
+                coverage_complete = False
+
+            if decision.scope == "bounded" and not coverage_complete:
+                discard_candidate(active_export_dir, config.output_dir)
+                decision = ExportDecision(
+                    "full", decision.expected_ids, None, None, "bounded validation failed"
+                )
+                active_export_dir = create_stage(config.output_dir, uuid.uuid4().hex)
+                effective_config = dataclasses.replace(config, export_dir=active_export_dir)
+                request = ExportRequest(
+                    active_export_dir, None, None, active_export_dir / "media", False
+                )
+                export_had_channel_failures = False
+                await run_dce_export(
+                    effective_config, dce_path, record_export_event, request=request
+                )
+                witness = inspect_stage(active_export_dir, config.output_dir, "full")
+                coverage_complete = not export_had_channel_failures and validate_coverage(
+                    witness, decision.expected_ids
+                )
+            witness = dataclasses.replace(witness, coverage_complete=coverage_complete)
+            state.export_completed = coverage_complete
+            accept_stage(
+                state,
+                config.output_dir,
+                witness,
+                lambda snapshot: save_state(snapshot, config.output_dir),
             )
         else:
-            await run_dce_export(effective_config, dce_path, record_export_event, request=request)
-        state.export_completed = not export_had_channel_failures
-        save_state(state, config.output_dir)
+            state.export_completed = not export_had_channel_failures
+            save_state(state, config.output_dir)
         on_event(MigrationEvent(phase="export", status="completed", message="Export complete."))
     else:
         on_event(MigrationEvent(phase="export", status="skipped", message="Using existing exports"))
