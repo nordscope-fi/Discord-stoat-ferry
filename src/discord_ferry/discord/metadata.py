@@ -149,6 +149,14 @@ def _capture_source_channel(channel: DiscordChannel) -> SourceChannel:
         overwrites,
         member_count,
         channel.capture_fields,
+        parent_id=channel.parent_id if "parent_id" in channel.capture_fields else None,
+        thread_archived=channel.thread_archived
+        if "thread_metadata.archived" in channel.capture_fields
+        else None,
+        thread_locked=channel.thread_locked
+        if "thread_metadata.locked" in channel.capture_fields
+        else None,
+        nsfw=channel.nsfw if "nsfw" in channel.capture_fields else None,
     )
 
 
@@ -204,6 +212,18 @@ def _permission_source_payload(source: PermissionSourceEvidence) -> dict[str, An
                 ],
                 "member_overwrite_count": c.member_overwrite_count,
                 "capture_fields": sorted(c.capture_fields),
+                **({"parent_id": c.parent_id} if "parent_id" in c.capture_fields else {}),
+                **(
+                    {"thread_archived": c.thread_archived}
+                    if "thread_metadata.archived" in c.capture_fields
+                    else {}
+                ),
+                **(
+                    {"thread_locked": c.thread_locked}
+                    if "thread_metadata.locked" in c.capture_fields
+                    else {}
+                ),
+                **({"nsfw": c.nsfw} if "nsfw" in c.capture_fields else {}),
             }
             for c in source.channels
         ],
@@ -273,6 +293,10 @@ def _dict_to_permission_source(value: object) -> PermissionSourceEvidence | None
                     ),
                     c.get("member_overwrite_count"),
                     _source_fields(c["capture_fields"]),
+                    parent_id=c.get("parent_id"),
+                    thread_archived=c.get("thread_archived"),
+                    thread_locked=c.get("thread_locked"),
+                    nsfw=c.get("nsfw"),
                 )
                 for c in _source_list(value["channels"])
             ),
@@ -340,8 +364,50 @@ def validate_source_snapshot(
             return refused("Refresh required raw role permission, position and managed facts")
     if roles[source.guild_id].managed is not False:
         return refused("Refresh the source everyone role inventory")
+
+    def complete_overwrites(channel: SourceChannel) -> bool:
+        if (
+            not {"id", "type", "permission_overwrites"} <= channel.capture_fields
+            or _source_integer(channel.type) is None
+            or channel.overwrites is None
+            or _source_integer(channel.member_overwrite_count) is None
+        ):
+            return False
+        overwrite_ids = [overwrite.role_id for overwrite in channel.overwrites]
+        return not (
+            len(set(overwrite_ids)) != len(overwrite_ids)
+            or any(
+                overwrite.role_id not in roles
+                or _source_integer(overwrite.allow) is None
+                or _source_integer(overwrite.deny) is None
+                for overwrite in channel.overwrites
+            )
+        )
+
     for cid in sorted(channel_ids):
         channel = channels[cid]
+        if channel.type in {10, 11}:
+            parent = channels.get(channel.parent_id or "")
+            if (
+                channel.parent_id is None
+                or channel.thread_archived is not False
+                or channel.thread_locked is not False
+                or not {
+                    "id",
+                    "type",
+                    "parent_id",
+                    "thread_metadata.archived",
+                    "thread_metadata.locked",
+                }
+                <= channel.capture_fields
+                or parent is None
+                or parent.type not in {0, 2, 4, 5, 13, 15, 16}
+                or parent.nsfw is None
+                or not {"id", "type", "permission_overwrites", "nsfw"} <= parent.capture_fields
+                or not complete_overwrites(parent)
+            ):
+                return refused("Refresh complete active public thread and ordinary parent facts")
+            continue
         if (
             not {"id", "type", "permission_overwrites"} <= channel.capture_fields
             or _source_integer(channel.type) is None
@@ -378,6 +444,8 @@ def validate_source_snapshot(
             return refused("Refresh inconsistent translated role permissions")
     for cid in sorted(channel_ids):
         channel = channels[cid]
+        if channel.type in {10, 11}:
+            continue
         translated = meta.channel_metadata.get(cid)
         if not isinstance(translated, ChannelMeta):
             return refused("Refresh missing translated selected-channel permissions")

@@ -103,6 +103,75 @@ def test_permission_source_preserves_raw_inventory_and_excludes_private_values(
         assert excluded not in text
 
 
+def test_thread_source_validation_requires_complete_parent() -> None:
+    from discord_ferry.core.permissions import PermissionSourceEvidence, SourceChannel, SourceRole
+
+    source = PermissionSourceEvidence(
+        "111",
+        "discord-to-stoat-v1",
+        (SourceRole("111", 0, 0, False, frozenset({"id", "permissions", "position", "managed"})),),
+        (
+            SourceChannel(
+                "222",
+                11,
+                None,
+                None,
+                frozenset(
+                    {
+                        "id",
+                        "type",
+                        "parent_id",
+                        "thread_metadata.archived",
+                        "thread_metadata.locked",
+                    }
+                ),
+                parent_id="223",
+                thread_archived=False,
+                thread_locked=False,
+            ),
+        ),
+        frozenset({"222"}),
+        "",
+    )
+    meta = DiscordMetadata("111", "now", 0, {}, {}, permission_source=source)
+    assert metadata_module.validate_permission_source(meta, frozenset({"222"}))
+
+
+def test_thread_source_validation_accepts_complete_active_parent() -> None:
+    roles = [
+        _parse_role(
+            {
+                "id": "111",
+                "name": "everyone",
+                "permissions": "8",
+                "position": 0,
+                "managed": False,
+            }
+        )
+    ]
+    parent = _parse_channel(
+        {
+            "id": "223",
+            "name": "parent",
+            "type": 0,
+            "nsfw": False,
+            "permission_overwrites": [],
+        }
+    )
+    child = _parse_channel(
+        {
+            "id": "222",
+            "name": "thread",
+            "type": 11,
+            "parent_id": "223",
+            "thread_metadata": {"archived": False, "locked": False},
+        }
+    )
+    source = metadata_module.capture_permission_source("111", roles, [parent, child])
+    meta = DiscordMetadata("111", "now", translate_permissions(8), {}, {}, permission_source=source)
+    assert metadata_module.validate_permission_source(meta, frozenset({"222"})) == ()
+
+
 def test_source_fingerprint_is_structural_canonical_and_input_independent() -> None:
     original = _permission_capture()
     roles = [

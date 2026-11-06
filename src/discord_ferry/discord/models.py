@@ -42,6 +42,10 @@ class DiscordChannel:
     id: str
     name: str
     type: int
+    guild_id: str | None = None
+    parent_id: str | None = None
+    thread_archived: bool | None = None
+    thread_locked: bool | None = None
     nsfw: bool = False
     position: int | None = None
     rate_limit_per_user: int = 0  # slowmode seconds (text channels)

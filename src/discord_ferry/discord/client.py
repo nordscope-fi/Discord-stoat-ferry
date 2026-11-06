@@ -97,6 +97,13 @@ async def fetch_guild_channels(
     return [_parse_channel(c) for c in data]
 
 
+async def fetch_channel(
+    session: aiohttp.ClientSession, token: str, channel_id: str
+) -> DiscordChannel:
+    """Fetch and parse one Discord channel."""
+    return _parse_channel(await _discord_get_object(session, token, f"/channels/{channel_id}"))
+
+
 def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
     """Parse a rate-limit delay (seconds) from standard headers; None if absent/non-numeric.
 
@@ -275,14 +282,26 @@ def _parse_channel(data: dict[str, Any]) -> DiscordChannel:
         )
         for ow in data.get("permission_overwrites", [])
     ]
+    thread_metadata = data.get("thread_metadata")
+    archived = thread_metadata.get("archived") if isinstance(thread_metadata, dict) else None
+    locked = thread_metadata.get("locked") if isinstance(thread_metadata, dict) else None
+    capture_fields = set(data)
+    if type(archived) is bool:
+        capture_fields.add("thread_metadata.archived")
+    if type(locked) is bool:
+        capture_fields.add("thread_metadata.locked")
     return DiscordChannel(
         id=str(data["id"]),
         name=data["name"],
         type=data["type"],
+        guild_id=data.get("guild_id") if isinstance(data.get("guild_id"), str) else None,
+        parent_id=data.get("parent_id") if isinstance(data.get("parent_id"), str) else None,
+        thread_archived=archived if type(archived) is bool else None,
+        thread_locked=locked if type(locked) is bool else None,
         nsfw=data.get("nsfw", False),
         position=normalize_channel_position(data.get("position")),
         rate_limit_per_user=data.get("rate_limit_per_user", 0),
         user_limit=data.get("user_limit", 0),
         permission_overwrites=overwrites,
-        capture_fields=frozenset(data),
+        capture_fields=frozenset(capture_fields),
     )
