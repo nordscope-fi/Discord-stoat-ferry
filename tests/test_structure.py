@@ -3515,6 +3515,71 @@ async def test_run_channels_passes_nsfw_flag(channel_attributes_only, tmp_path: 
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_public_thread_records_parent_before_an_uncertain_create(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry.core import permissions as p
+
+    child_id = "100000000000000011"
+    parent_id = "100000000000000010"
+    source = p.PermissionSourceEvidence(
+        "111",
+        "discord-to-stoat-v1",
+        channels=(
+            p.SourceChannel(
+                parent_id,
+                0,
+                (),
+                0,
+                frozenset({"id", "type", "permission_overwrites", "nsfw"}),
+                nsfw=True,
+            ),
+            p.SourceChannel(
+                child_id,
+                11,
+                None,
+                None,
+                frozenset(
+                    {
+                        "id",
+                        "type",
+                        "parent_id",
+                        "thread_metadata.archived",
+                        "thread_metadata.locked",
+                    }
+                ),
+                parent_id=parent_id,
+                thread_archived=False,
+                thread_locked=False,
+            ),
+        ),
+        covered_channel_ids=frozenset({child_id, parent_id}),
+    )
+    save_discord_metadata(
+        DiscordMetadata("111", "t", 0, {}, {}, permission_source=source), tmp_path
+    )
+    state = MigrationState(stoat_server_id="01J5T000000000000000009000")
+    export = _make_export(
+        channel_id=child_id,
+        channel_type=11,
+        category_id=parent_id,
+        is_thread=True,
+        parent_channel_name="parent",
+    )
+
+    async def uncertain_create(*_args: object, **_kwargs: object) -> dict[str, str]:
+        raise MigrationError("connection ended after dispatch")
+
+    monkeypatch.setattr(structure_module, "api_create_channel", uncertain_create)
+    with pytest.raises(MigrationError, match="connection ended"):
+        await run_channels(_make_config(tmp_path), state, [export], lambda _event: None)
+
+    saved = load_state(tmp_path)
+    assert saved.thread_parent_ids == {child_id: parent_id}
+    assert saved.channel_map == {}
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_truncates_long_topic(channel_attributes_only, tmp_path: Path) -> None:
     """A channel topic longer than 1024 chars is truncated before reaching Stoat."""
     events: list[MigrationEvent] = []

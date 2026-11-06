@@ -1371,8 +1371,8 @@ async def run_channels(
 
     # Deduplicate exports by channel ID and skip category channels (type 4).
     seen_channel_ids: set[str] = set()
-    # Each entry: (channel, stoat_type, unique_name, effective_category_id, is_thread)
-    channels_to_create: list[tuple[DCEChannel, str | None, str, str, bool]] = []
+    # Keep public-thread proof beside its child identity until create confirms.
+    channels_to_create: list[tuple[DCEChannel, str | None, str, str, bool, str | None, bool]] = []
     existing_names: set[str] = set()
     # Forum categories: forum_cat_key -> forum display name (created lazily).
     forum_categories: dict[str, str] = {}
@@ -1420,8 +1420,29 @@ async def run_channels(
                 forum_categories[forum_cat_key] = export.parent_channel_name
             effective_cat_id = forum_cat_key
 
+        approved_parent_id: str | None = None
+        parent_nsfw = False
+        if channel.type in {10, 11} and discord_metadata and discord_metadata.permission_source:
+            source_channels = {
+                item.id: item for item in discord_metadata.permission_source.channels
+            }
+            source_child = source_channels.get(channel.id)
+            if source_child is not None and source_child.parent_id is not None:
+                source_parent = source_channels.get(source_child.parent_id)
+                if source_parent is not None and source_parent.nsfw is not None:
+                    approved_parent_id = source_child.parent_id
+                    parent_nsfw = source_parent.nsfw
+
         channels_to_create.append(
-            (channel, stoat_type, unique_name, effective_cat_id, export.is_thread)
+            (
+                channel,
+                stoat_type,
+                unique_name,
+                effective_cat_id,
+                export.is_thread,
+                approved_parent_id,
+                parent_nsfw,
+            )
         )
 
     # Reserve channel slots for forum index channels (one per forum category).
@@ -1495,7 +1516,15 @@ async def run_channels(
             state.forum_category_names[forum_key] = forum_name  # S15: track for REPORT rebuild
 
     if config.dry_run:
-        for channel, _stoat_type, _unique_name, _discord_cat_id, _is_thread in channels_to_create:
+        for (
+            channel,
+            _stoat_type,
+            _unique_name,
+            _discord_cat_id,
+            _is_thread,
+            _parent,
+            _nsfw,
+        ) in channels_to_create:
             state.channel_map[channel.id] = f"dry-ch-{channel.id}"
         on_event(
             MigrationEvent(
@@ -1515,16 +1544,35 @@ async def run_channels(
     forum_channel_info: dict[str, list[tuple[str, str, int]]] = {}
 
     async with get_session(config) as session:
-        for idx, (channel, stoat_type, unique_name, discord_cat_id, _is_thread) in enumerate(
-            channels_to_create, start=1
-        ):
+        for idx, (
+            channel,
+            stoat_type,
+            unique_name,
+            discord_cat_id,
+            _is_thread,
+            approved_parent_id,
+            parent_nsfw,
+        ) in enumerate(channels_to_create, start=1):
             ch: DCEChannel = channel
             description = ch.topic[:1024] if ch.topic else None
 
             ch_meta = discord_metadata.channel_metadata.get(ch.id) if discord_metadata else None
-            nsfw = ch_meta.nsfw if ch_meta else False
+            nsfw = (
+                parent_nsfw
+                if approved_parent_id is not None
+                else ch_meta.nsfw
+                if ch_meta
+                else False
+            )
 
             stoat_channel_id: str
+            if approved_parent_id is not None:
+                recorded_parent = state.thread_parent_ids.get(ch.id)
+                if recorded_parent is None:
+                    state.thread_parent_ids[ch.id] = approved_parent_id
+                    save_state(state, config.output_dir)
+                elif recorded_parent != approved_parent_id:
+                    raise runtime.stop("unverified", stage="application")
             if ch.id in pre_existing_channel_ids:
                 # Incremental: reuse the carried Stoat channel id — no create, no
                 # permission overrides, no slowmode/voice attrs (all applied on

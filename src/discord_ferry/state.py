@@ -123,6 +123,7 @@ class MigrationState:
     # Discord ID -> Stoat ID mappings
     role_map: dict[str, str] = field(default_factory=dict)
     channel_map: dict[str, str] = field(default_factory=dict)
+    thread_parent_ids: dict[str, str] = field(default_factory=dict)
     category_map: dict[str, str] = field(default_factory=dict)
     category_names: dict[str, str] = field(default_factory=dict)  # discord_cat_id -> title
     # The names Ferry SENT to Stoat, keyed exactly as the id maps above.
@@ -856,6 +857,12 @@ def check_state_ids(state: MigrationState) -> None:
         _STOAT_ULID,
         _FORUM_INDEX_KEY_PREFIX,
     )
+    if isinstance(state.thread_parent_ids, dict):
+        for child, parent in state.thread_parent_ids.items():
+            p.discord(f"thread_parent_ids[{_show(child)}]", child)
+            p.discord(f"thread_parent_ids[{_show(child)}] parent", parent)
+    else:
+        p.add("thread_parent_ids", "expected an object of Discord id pairs")
     _check_map(
         p,
         "category_map",
@@ -943,6 +950,7 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "pending_delivery_replacements": _delivery_map(state.pending_delivery_replacements),
         "role_map": state.role_map,
         "channel_map": state.channel_map,
+        "thread_parent_ids": state.thread_parent_ids,
         "category_map": state.category_map,
         "category_names": state.category_names,
         "created_channel_names": state.created_channel_names,
@@ -1030,6 +1038,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             ),
             role_map=data.get("role_map", {}),
             channel_map=data.get("channel_map", {}),
+            thread_parent_ids=data.get("thread_parent_ids", {}),
             category_map=data.get("category_map", {}),
             category_names=data.get("category_names", {}),
             created_channel_names=data.get("created_channel_names", {}),
