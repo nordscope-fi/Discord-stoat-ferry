@@ -53,6 +53,17 @@ _CREATE_NEW_PROCESS_GROUP: int = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP",
 _CREATE_NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+@dataclass(frozen=True)
+class ExportRequest:
+    """The one owned DCE invocation Ferry is permitted to make."""
+
+    output_dir: Path
+    after_id: str | None
+    before_id: str | None
+    media_dir: Path
+    reuse_media: bool
+
+
 def _validated_dce_parallel(value: object) -> int:
     if type(value) is not int or not DCE_PARALLEL_MIN <= value <= DCE_PARALLEL_MAX:
         raise ExportError(
@@ -165,6 +176,7 @@ def _build_dce_command(
     dce_path: Path,
     *,
     reuse_media: bool = False,
+    request: ExportRequest | None = None,
 ) -> list[str]:
     """Build the DCE CLI command list.
 
@@ -172,6 +184,8 @@ def _build_dce_command(
     and ``run_dce_export`` sets that in the child environment, so the token never
     shows in a process listing (#978).
     """
+    output_dir = request.output_dir if request is not None else config.export_dir
+    effective_reuse = request.reuse_media if request is not None else reuse_media
     dce_parallel = _validated_dce_parallel(config.dce_parallel)
     command = [
         str(dce_path),
@@ -179,19 +193,29 @@ def _build_dce_command(
         "-g",
         config.discord_server_id or "",
         "--media",
-        "--markdown",
-        "false",
-        "--format",
-        "Json",
-        "--include-threads",
-        "All",
-        "--parallel",
-        str(dce_parallel),
-        "--output",
-        str(config.export_dir).replace("%", "%%"),
     ]
-    if reuse_media:
+    if request is not None:
+        command.extend(("--media-dir", str(request.media_dir)))
+    command.extend(
+        [
+            "--markdown",
+            "false",
+            "--format",
+            "Json",
+            "--include-threads",
+            "All",
+            "--parallel",
+            str(dce_parallel),
+            "--output",
+            str(output_dir).replace("%", "%%"),
+        ]
+    )
+    if effective_reuse:
         command.insert(command.index("--markdown"), "--reuse-media")
+    if request is not None and request.after_id is not None:
+        command.extend(("--after", request.after_id))
+    if request is not None and request.before_id is not None:
+        command.extend(("--before", request.before_id))
     return command
 
 
@@ -558,6 +582,7 @@ async def run_dce_export(
     on_event: EventCallback,
     *,
     reuse_media: bool = False,
+    request: ExportRequest | None = None,
     reuse_media_reason: str = "no previous completed export is recorded for this folder",
 ) -> Path:
     """Run DCE as an async subprocess and stream progress.
@@ -576,12 +601,14 @@ async def run_dce_export(
         ExportError: If DCE exits with a non-zero code.
         asyncio.CancelledError: If cancelled via config.cancel_event.
     """
-    _check_disk_space(config.export_dir, on_event)
+    output_dir = request.output_dir if request is not None else config.export_dir
+    effective_reuse = request.reuse_media if request is not None else reuse_media
+    _check_disk_space(output_dir, on_event)
 
-    cmd = _build_dce_command(config, dce_path, reuse_media=reuse_media)
-    config.export_dir.mkdir(parents=True, exist_ok=True)
+    cmd = _build_dce_command(config, dce_path, reuse_media=reuse_media, request=request)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    if not reuse_media:
+    if not effective_reuse:
         on_event(
             MigrationEvent(
                 phase="export",
@@ -780,4 +807,4 @@ async def run_dce_export(
             f"DCE export failed (exit code {process.returncode}): {first_err or 'Unknown error'}"
         )
 
-    return config.export_dir
+    return output_dir

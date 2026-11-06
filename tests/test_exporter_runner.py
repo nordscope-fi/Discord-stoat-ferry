@@ -18,6 +18,7 @@ from discord_ferry.config import FerryConfig
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.errors import ExportError
 from discord_ferry.exporter.runner import (
+    ExportRequest,
     _build_dce_command,
     _check_disk_space,
     _drain_overlong_line,
@@ -108,6 +109,22 @@ def _make_process(
 
 
 class TestBuildCommand:
+    def test_bounded_request_uses_owned_paths(self, tmp_path: Path) -> None:
+        request = ExportRequest(
+            tmp_path / "stage",
+            "1543572368977428611",
+            "1543572393384087642",
+            tmp_path / "stage" / "media",
+            True,
+        )
+
+        command = _build_dce_command(_make_config(tmp_path), tmp_path / "dce", request=request)
+
+        assert command[command.index("--after") + 1] == request.after_id
+        assert command[command.index("--before") + 1] == request.before_id
+        assert command[command.index("--media-dir") + 1] == str(request.media_dir)
+        assert "--reuse-media" in command
+
     def test_command_construction(self, tmp_path: Path) -> None:
         dce_path = tmp_path / "dce"
         cfg = _make_config(tmp_path)
@@ -130,6 +147,32 @@ class TestBuildCommand:
         assert "--output" in cmd
         assert str(tmp_path / "exports") in cmd
         assert cmd[cmd.index("--parallel") + 1] == "1"
+
+    def test_legacy_boolean_reuse_keeps_dce_default_media_layout(self, tmp_path: Path) -> None:
+        command = _build_dce_command(_make_config(tmp_path), tmp_path / "dce", reuse_media=True)
+
+        assert "--reuse-media" in command
+        assert "--media-dir" not in command
+
+    async def test_legacy_run_keeps_dce_default_media_layout(self, tmp_path: Path) -> None:
+        process = _make_process([])
+        create_process = AsyncMock(return_value=process)
+
+        with patch(
+            "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+            new=create_process,
+        ):
+            result = await run_dce_export(
+                _make_config(tmp_path),
+                tmp_path / "dce",
+                lambda _event: None,
+                reuse_media=True,
+            )
+
+        command = create_process.await_args.args
+        assert "--reuse-media" in command
+        assert "--media-dir" not in command
+        assert result == tmp_path / "exports"
 
     def test_command_passes_the_selected_dce_worker_count(self, tmp_path: Path) -> None:
         config = replace(_make_config(tmp_path), dce_parallel=3)
