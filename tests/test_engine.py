@@ -31,7 +31,14 @@ from discord_ferry.discord.metadata import (
     save_discord_metadata,
 )
 from discord_ferry.discord.models import DiscordChannel, DiscordRole
-from discord_ferry.errors import CheckError, ExportError, MigrationError, PermissionSafetyError
+from discord_ferry.errors import (
+    CheckError,
+    DiscordAuthError,
+    ExportError,
+    MigrationError,
+    PermissionSafetyError,
+)
+from discord_ferry.exporter.runner import ExportRequest
 from discord_ferry.migrator import delivery as delivery_module
 from discord_ferry.migrator import messages as messages_module
 from discord_ferry.migrator.api import ServerReadView
@@ -410,6 +417,84 @@ async def test_public_thread_classifier_refuses_malformed_fetched_parent_facts(
     assert caught.value.outcome.effects == "none_confirmed"
     assert metadata_path.read_bytes() == before
     target_fetch.assert_not_awaited()
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_incremental_inventory_auth_failure_stops_before_dce(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guild_id = "1543572361285083187"
+    config = _make_config(
+        tmp_path,
+        skip_export=False,
+        incremental=True,
+        export_dir=tmp_path / "dce_cache" / guild_id,
+        discord_token="source-token",
+        discord_server_id=guild_id,
+    )
+    auth_failure = DiscordAuthError("inventory authentication failed")
+    inventory = AsyncMock(side_effect=auth_failure)
+    run_dce = AsyncMock(side_effect=AssertionError("DCE started after fatal authentication"))
+    monkeypatch.setattr(engine_module, "fetch_export_source_ids", inventory)
+    monkeypatch.setattr(engine_module, "validate_discord_token", AsyncMock())
+    monkeypatch.setattr(engine_module, "get_dce_path", lambda: Path("/dce"))
+    monkeypatch.setattr(engine_module, "run_dce_export", run_dce)
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+
+    with pytest.raises(DiscordAuthError) as caught:
+        await run_migration(config, lambda _event: None, phase_overrides=_NOOP_OVERRIDES)
+
+    assert caught.value is auth_failure
+    inventory.assert_awaited_once()
+    run_dce.assert_not_awaited()
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_incremental_marker_gap_uses_full_owned_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry.state import save_state
+
+    guild_id = "1543572361285083187"
+    save_state(MigrationState(channel_high_water={guild_id: ""}, export_completed=True), tmp_path)
+    config = _make_config(
+        tmp_path,
+        skip_export=False,
+        incremental=True,
+        export_dir=tmp_path / "dce_cache" / guild_id,
+        discord_token=None,
+        discord_server_id=guild_id,
+    )
+    events: list[MigrationEvent] = []
+
+    async def write_requested_stage(
+        _config: FerryConfig,
+        _dce_path: Path,
+        _on_event: EventCallback,
+        *,
+        request: ExportRequest,
+        **_kwargs: object,
+    ) -> Path:
+        payload = json.loads((FIXTURES_DIR / "simple_channel.json").read_text())
+        payload["channel"]["id"] = guild_id
+        request.output_dir.mkdir(parents=True, exist_ok=True)
+        (request.output_dir / f"{guild_id}.json").write_text(json.dumps(payload))
+        return request.output_dir
+
+    run_dce = AsyncMock(side_effect=write_requested_stage)
+    monkeypatch.setattr(
+        engine_module, "fetch_export_source_ids", AsyncMock(return_value=((guild_id,), True))
+    )
+    monkeypatch.setattr(engine_module, "validate_discord_token", AsyncMock())
+    monkeypatch.setattr(engine_module, "get_dce_path", lambda: Path("/dce"))
+    monkeypatch.setattr(engine_module, "run_dce_export", run_dce)
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+
+    await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+
+    assert run_dce.await_args.args[0].export_dir.parent.name == "staged-exports"
+    assert run_dce.await_args.kwargs["request"].after_id is None
+    assert any("full export" in event.message.lower() for event in events)
 
 
 @pytest.fixture
