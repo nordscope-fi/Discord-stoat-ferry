@@ -39,7 +39,7 @@ These limitations affect how individual messages and their content appear after 
 
 | Discord Feature | What Stoat Gets | Workaround |
 |-----------------|----------------|------------|
-| Embeds | Flattened to markdown text; inline fields use `\|` separators | None; Stoat embeds have a different structure and cannot replicate Discord embeds exactly |
+| Embeds | Flattened to markdown text; inline fields use `\|` separators. A usable local embedded video is uploaded first, then a local thumbnail or image. | Ferry does not fetch remote media, transcode video, or promise that a client can play it. Stoat embeds have a different structure and cannot replicate Discord embeds exactly. |
 | Polls | Active polls are unavailable because DCE 2.48 does not export them. Closed-poll notifications keep the fallback text and embeds that DCE writes. | Keep a separate record of active poll choices and results before migration if they matter. Stoat has no native poll endpoint used by Ferry. |
 | Application command interactions | Ferry adds the command name and invoking user's display name above the message. Interaction IDs and the user's other profile fields are not sent. | None. Stoat has no matching command-interaction object. |
 | Stickers | Uploaded as image attachments where the source file is available; Lottie (animated) stickers receive a text fallback | None; Lottie format is not supported by Stoat |

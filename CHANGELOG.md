@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.4.0] - 2026-11-06
+
+### Added
+
+- Migrate usable local embedded video before thumbnail and image fallback, preserving delivery evidence and recovery behavior (#1252).
+
 ## [3.3.0] - 2026-11-05
 
 ### Added
