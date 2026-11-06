@@ -31,6 +31,10 @@ def _make_config(tmp_path: Path, **overrides: object) -> FerryConfig:
         "token": "test-token",
         "output_dir": tmp_path,
         "skip_export": True,  # tests use offline mode with fixture exports
+        # This module exercises ordinary dry-run state and limits. The shared
+        # fixture also contains threads, which require their own proved source
+        # evidence and are covered by the engine thread-admission tests.
+        "skip_threads": True,
     }
     defaults.update(overrides)
     return FerryConfig(**defaults)  # type: ignore[arg-type]
