@@ -226,6 +226,9 @@ Before creating anything on Stoat, Ferry shows a review summary.
     complete matching cached evidence. Missing evidence or access that cannot be preserved stops
     the operation instead of creating channels without proved access. See
     [permission recovery](../guides/earlier-migrations.md#recover-channel-access-before-continuing).
+    Flattened announcement and public threads also need a verified active, unlocked parent with
+    matching inherited send access. Private threads, member-specific access, incomplete parent
+    facts, and unequal thread-send access stop before Ferry creates a destination channel.
 
 ---
 
@@ -297,6 +300,8 @@ Before creating anything on Stoat, Ferry shows a review summary.
 After a successful migration:
 
 - Selected supported channels and categories are recreated; unprovable access stops the operation
+- Flattened announcement and public threads are recreated only after Ferry verifies their parent
+  relationship and inherited permissions; use `--skip-threads` to omit threads instead
 - Channels marked not safe for work (NSFW) are correctly flagged
 - Channel permission overrides (@everyone and per-role) are applied
 - Normal DCE forum-post exports do not currently produce a supported generated forum index; see [known limitations](../guides/known-limitations.md#structural)

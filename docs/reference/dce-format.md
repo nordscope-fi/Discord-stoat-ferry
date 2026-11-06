@@ -60,10 +60,10 @@ DCE writes one JSON file per channel or thread, using a deterministic naming pat
 | Thread in channel | `{Guild} - {Channel} - {Thread Name} [{thread_id}].json` |
 
 For a thread, DCE 2.48 writes its parent channel ID to `channel.categoryId` and the parent name to
-`channel.category`. Ferry treats the parsed channel type as authoritative. When a parent ID is
-present, Ferry reads the parent from those JSON fields. Without a parent ID, it falls back to the
-three-segment filename. The ID in brackets is always the thread's own ID, not the parent channel's
-ID.
+`channel.category`. Ferry treats the parsed channel type as authoritative. A flattened public or
+announcement thread needs this parent ID as a claim that Ferry verifies against Discord before a
+destination effect. Filename inference may help identify an export, but cannot prove a parent for
+thread admission. The ID in brackets is always the thread's own ID, not the parent channel's ID.
 
 The ID in brackets is always at the end of the stem before the `.json` extension. Ferry extracts it
 with a regex on the filename.
@@ -117,9 +117,9 @@ users hold old exports.
 | `GuildVoiceChat` | 2 | VoiceChannel | Requires LiveKit on the target instance. Ferry retries a failed creation as text. |
 | `GuildCategory` | 4 | Category | Two-step creation, see [Stoat API Notes](stoat-api-notes.md) |
 | `GuildNews` | 5 | TextChannel | An announcement channel, treated as text |
-| `GuildNewsThread` | 10 | TextChannel (flatten) | Becomes a standalone text channel |
-| `GuildPublicThread` | 11 | TextChannel (flatten) | Becomes a standalone text channel |
-| `GuildPrivateThread` | 12 | TextChannel (flatten) | Becomes a standalone text channel |
+| `GuildNewsThread` | 10 | TextChannel (flatten) | Migrated only after Ferry verifies its active, unlocked ordinary parent and equal inherited send access |
+| `GuildPublicThread` | 11 | TextChannel (flatten) | Migrated only after Ferry verifies its active, unlocked ordinary parent and equal inherited send access |
+| `GuildPrivateThread` | 12 | Not migrated | Private-thread access cannot be reproduced and stops before a destination effect |
 | `GuildStageVoice` | 13 | VoiceChannel | Treated like `GuildVoiceChat`. Stoat has no stage channel, so stage-only features are lost. |
 | `GuildDirectory` | 14 | Not migrated | No Stoat equivalent |
 | `GuildForum` | 15 | Parser compatibility only | DCE 2.48 removes forum containers before export. Their posts arrive as `GuildPublicThread` (11), so normal 2.48 exports do not reach Ferry's type-15 delivery path. |
@@ -128,6 +128,8 @@ users hold old exports.
 Stoat has exactly five channel types. `SavedMessages` stores a user's own notes, `DirectMessage`
 and `Group` are private chats, and `TextChannel` and `VoiceChannel` are server channels.
 There are no native threads or forums, so Discord threads are flattened into regular text channels.
+Ferry refuses incomplete evidence, member-specific access, unequal inherited send access, and
+unproved parent relationships rather than creating a broader destination channel.
 
 The 2.48 field-disposition ledger uses `consumed` to mean that Ferry parses a field. It does not
 promise that the field controls destination delivery. In normal DCE 2.48 output, forum containers

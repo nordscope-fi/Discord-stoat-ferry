@@ -14,14 +14,16 @@ Every migration involves trade-offs. Discord and Stoat are different platforms w
 
 These limitations relate to how channels, threads, and server organization are represented after migration.
 
-All thread strategies remain subject to the permission check. Unproved thread membership or
-inheritance stops the whole operation. Merge and archive do not bypass that check; use
-`--skip-threads` to exclude threads. Normal DCE forum routing and source-evidence correction
-is tracked in [#1217](https://github.com/nordscope-fi/Discord-stoat-ferry/issues/1217), not implemented in this release.
+Flattened announcement and public threads migrate only when Ferry verifies their exact parent,
+parent access, inherited age restriction, active unlocked lifecycle, and representable send access.
+Private threads, member-specific access, incomplete evidence, and unequal thread-send access stop
+before a destination write. Merge, archive, and `--skip-threads` retain their existing behavior.
+Filename inference cannot prove a thread parent. Normal forum routing is tracked in
+[#1217](https://github.com/nordscope-fi/Discord-stoat-ferry/issues/1217), not implemented in this release.
 
 | Discord Feature | What Stoat Gets | Workaround |
 |-----------------|----------------|------------|
-| Threads | Flattened to text channels by default, prefixed with parent channel name (e.g. `general-my-thread`) | Use `--thread-strategy merge` to append thread messages into the parent channel. Use `--thread-strategy archive` to write local markdown files under `<output directory>/threads/<parent channel>/<thread>.md`; archive mode posts nothing to Stoat. Both options are also available in the GUI's thread strategy setting. |
+| Threads | Eligible public and announcement threads are flattened to text channels by default, prefixed with parent channel name (e.g. `general-my-thread`). Private or unproved threads stop before a destination effect. | Use `--thread-strategy merge` to append eligible thread messages into the parent channel. Use `--thread-strategy archive` to write local markdown files under `<output directory>/threads/<parent channel>/<thread>.md`; archive mode posts nothing to Stoat. Use `--skip-threads` to exclude threads. |
 | Forum posts | Normal DCE exports do not produce a supported generated forum index. Thread access must not be assumed to match its parent. | Exclude unprovable threads with `--skip-threads`; see #1217 above. |
 | Stage Channels | Created as Stoat voice channels, with the same limits as any voice channel (see Voice channels below). Stage-only features such as speaker requests have no Stoat equivalent. | None |
 | Scheduled Events | Not migrated | None |
