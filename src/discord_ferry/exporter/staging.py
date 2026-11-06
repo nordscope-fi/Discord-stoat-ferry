@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from discord_ferry.errors import ExportError
 from discord_ferry.parser.dce_parser import parse_single_export
 from discord_ferry.state import MigrationState, StagedInputWitness
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 _STAGE_OWNER_NAME = ".ferry-owned-stage"
@@ -117,3 +121,46 @@ def inspect_stage(
 def validate_coverage(witness: StagedInputWitness, expected_ids: tuple[str, ...]) -> bool:
     """Accept only an exact, non-empty current inventory match."""
     return bool(expected_ids) and witness.source_ids == tuple(sorted(set(expected_ids)))
+
+
+def discard_candidate(candidate: Path, output_root: Path) -> None:
+    """Delete only a contained, unaccepted candidate stage."""
+    shutil.rmtree(_owned_stage(candidate, output_root))
+
+
+def _retain_current_and_previous(
+    output_root: Path,
+    current: StagedInputWitness,
+    previous: StagedInputWitness | None,
+) -> None:
+    """Keep the accepted pair so a successful save never leaves a dangling witness."""
+    root = (output_root / "staged-exports").resolve(strict=True)
+    keep = {Path(current.relative_path).name}
+    if previous is not None:
+        keep.add(Path(previous.relative_path).name)
+    for child in root.iterdir():
+        if child.name in keep or not child.is_dir() or child.is_symlink():
+            continue
+        try:
+            owned_child = _owned_stage(child, output_root)
+        except ExportError:
+            continue
+        shutil.rmtree(owned_child)
+
+
+def accept_stage(
+    state: MigrationState,
+    output_root: Path,
+    candidate: StagedInputWitness,
+    persist: Callable[[MigrationState], None],
+) -> None:
+    """Persist an accepted witness before removing superseded owned stages."""
+    _owned_stage(output_root / candidate.relative_path, output_root)
+    previous = state.staged_input
+    state.staged_input = candidate
+    try:
+        persist(state)
+    except BaseException:
+        state.staged_input = previous
+        raise
+    _retain_current_and_previous(output_root, candidate, previous)
