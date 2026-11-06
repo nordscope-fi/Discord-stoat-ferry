@@ -107,6 +107,79 @@ class RollbackProgress:
     completed_at: str = ""
 
 
+@dataclass(frozen=True)
+class StagedInputWitness:
+    """Accepted staged DCE input evidence, stored relative to Ferry output."""
+
+    relative_path: str
+    source_ids: tuple[str, ...]
+    digest: str
+    scope: Literal["full", "bounded"]
+    input_valid: bool
+    coverage_complete: bool
+
+
+def _staged_input_digest(source_ids: tuple[str, ...]) -> str:
+    return hashlib.sha256("\n".join(source_ids).encode("ascii")).hexdigest()
+
+
+def _validate_staged_input_witness(witness: StagedInputWitness) -> StagedInputWitness:
+    """Refuse malformed saved evidence before it can steer export recovery."""
+    relative = Path(witness.relative_path)
+    if (
+        not isinstance(witness.relative_path, str)
+        or relative.is_absolute()
+        or len(relative.parts) != 2
+        or relative.parts[0] != "staged-exports"
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise StateError("Invalid staged input path")
+    if any(
+        not isinstance(source_id, str)
+        or not source_id.isascii()
+        or not source_id.isdecimal()
+        or int(source_id) == 0
+        for source_id in witness.source_ids
+    ) or witness.source_ids != tuple(sorted(set(witness.source_ids))):
+        raise StateError("Invalid staged input source IDs")
+    if not isinstance(witness.digest, str) or re.fullmatch(r"[0-9a-f]{64}", witness.digest) is None:
+        raise StateError("Invalid staged input digest")
+    if witness.digest != _staged_input_digest(witness.source_ids):
+        raise StateError("Invalid staged input digest")
+    if witness.scope not in {"full", "bounded"}:
+        raise StateError("Invalid staged input scope")
+    if type(witness.input_valid) is not bool or type(witness.coverage_complete) is not bool:
+        raise StateError("Invalid staged input validity")
+    return witness
+
+
+def _decode_staged_input(value: object) -> StagedInputWitness | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "relative_path",
+        "source_ids",
+        "digest",
+        "scope",
+        "input_valid",
+        "coverage_complete",
+    }:
+        raise StateError("Invalid staged input witness")
+    source_ids = value["source_ids"]
+    if not isinstance(source_ids, list):
+        raise StateError("Invalid staged input witness")
+    return _validate_staged_input_witness(
+        StagedInputWitness(
+            relative_path=value["relative_path"],
+            source_ids=tuple(source_ids),
+            digest=value["digest"],
+            scope=value["scope"],
+            input_valid=value["input_valid"],
+            coverage_complete=value["coverage_complete"],
+        )
+    )
+
+
 @dataclass
 class MigrationState:
     """Tracks all ID mappings and progress for resume support."""
@@ -228,6 +301,7 @@ class MigrationState:
 
     # Export phase tracking (for smart resume)
     export_completed: bool = False
+    staged_input: StagedInputWitness | None = None
 
     # Orphan upload tracking: detect Autumn files uploaded but never referenced in a message
     autumn_uploads: dict[str, str] = field(default_factory=dict)  # autumn_id -> source_id
@@ -287,6 +361,31 @@ class MigrationState:
     # best-effort full link ("" when the frontend base couldn't be discovered).
     invite_code: str = ""
     invite_url: str = ""
+
+    def validated_stage_path(self, output_dir: Path) -> Path:
+        """Resolve a saved accepted stage only when it remains contained and intact."""
+        witness = self.staged_input
+        if witness is None or not witness.input_valid:
+            raise StateError("No valid staged export input")
+        _validate_staged_input_witness(witness)
+        relative = Path(witness.relative_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise StateError("Invalid staged export path")
+        raw_path = output_dir / relative
+        stage_root = output_dir / "staged-exports"
+        if output_dir.is_symlink() or stage_root.is_symlink() or raw_path.is_symlink():
+            raise StateError("Invalid staged export path")
+        try:
+            path = raw_path.resolve(strict=True)
+            resolved_root = stage_root.resolve(strict=True)
+        except OSError as exc:
+            raise StateError("Invalid staged export path") from exc
+        if path.parent != resolved_root:
+            raise StateError("Invalid staged export path")
+        digest = _staged_input_digest(witness.source_ids)
+        if digest != witness.digest:
+            raise StateError("Invalid staged export digest")
+        return path
 
 
 def _delivery_string(value: object, pattern: str) -> str:
@@ -985,6 +1084,9 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "completed_at": state.completed_at,
         "is_dry_run": state.is_dry_run,
         "export_completed": state.export_completed,
+        "staged_input": (
+            dataclasses.asdict(state.staged_input) if state.staged_input is not None else None
+        ),
         "autumn_uploads": state.autumn_uploads,
         "referenced_autumn_ids": list(state.referenced_autumn_ids),
         "roles_finalized": list(state.roles_finalized),
@@ -1029,6 +1131,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
         )
 
     try:
+        staged_input = _decode_staged_input(data.get("staged_input"))
         state = MigrationState(
             delivery_namespace=data.get("delivery_namespace", ""),
             delivery_service_digest=data.get("delivery_service_digest", ""),
@@ -1073,6 +1176,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             completed_at=data.get("completed_at", ""),
             is_dry_run=data.get("is_dry_run", False),
             export_completed=data.get("export_completed", False),
+            staged_input=staged_input,
             autumn_uploads=data.get("autumn_uploads", {}),
             referenced_autumn_ids=set(data.get("referenced_autumn_ids", [])),
             roles_finalized=set(data.get("roles_finalized", [])),
