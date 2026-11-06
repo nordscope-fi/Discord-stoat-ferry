@@ -48,7 +48,7 @@ from discord_ferry.discord import (
     resume_refusal,
     save_discord_metadata,
 )
-from discord_ferry.discord.client import fetch_channel
+from discord_ferry.discord.client import fetch_channel, fetch_export_source_ids
 from discord_ferry.discord.metadata import (
     _bad_id,
     _capture_source_channel,
@@ -57,6 +57,8 @@ from discord_ferry.discord.metadata import (
 )
 from discord_ferry.errors import (
     DeliveryUnresolvedError,
+    DiscordAuthError,
+    ExportError,
     MigrationError,
     PermissionSafetyError,
     StateError,
@@ -67,6 +69,9 @@ from discord_ferry.exporter import (
     run_dce_export,
     validate_discord_token,
 )
+from discord_ferry.exporter.inventory import ExportDecision, SourceInventory, select_export_decision
+from discord_ferry.exporter.runner import ExportRequest
+from discord_ferry.exporter.staging import create_stage, inspect_stage
 from discord_ferry.migrator.api import (
     api_create_channel,
     api_create_invite,
@@ -453,6 +458,44 @@ def _export_media_reuse_policy(
     return True, None
 
 
+def _failed_ids(state: MigrationState) -> dict[str, tuple[str, ...]] | None:
+    """Group retries only when every saved failure has a source channel witness."""
+    grouped: dict[str, list[str]] = {}
+    for failure in state.failed_messages:
+        if failure.delivery_ref is None:
+            return None
+        grouped.setdefault(failure.delivery_ref.source_channel_id, []).append(
+            failure.discord_msg_id
+        )
+    return {source_id: tuple(ids) for source_id, ids in grouped.items()}
+
+
+def _decision_message(decision: ExportDecision) -> str:
+    if decision.scope == "bounded":
+        return "Using bounded export with proven coverage"
+    return "Using full export because current coverage is incomplete"
+
+
+def _has_complete_full_witness(
+    state: MigrationState, output_dir: Path, expected_ids: tuple[str, ...]
+) -> bool:
+    witness = state.staged_input
+    if (
+        witness is None
+        or witness.scope != "full"
+        or not witness.input_valid
+        or not witness.coverage_complete
+        or witness.source_ids != expected_ids
+    ):
+        return False
+    try:
+        saved_path = state.validated_stage_path(output_dir)
+        actual = inspect_stage(saved_path, output_dir, "full")
+    except (ExportError, StateError):
+        return False
+    return actual.source_ids == witness.source_ids and actual.digest == witness.digest
+
+
 async def run_migration(
     config: FerryConfig,
     on_event: EventCallback,
@@ -486,6 +529,8 @@ async def run_migration(
     previous_export_had_channel_failures = False
     previous_export_started_at = ""
     export_checkpoint_state: MigrationState | None = None
+    prior_state: MigrationState | None = None
+    active_export_dir = config.export_dir
     state_path = config.output_dir / "state.json"
 
     # Load or create state
@@ -501,6 +546,7 @@ async def run_migration(
     elif config.incremental:
         if state_path.exists():
             prior = load_state(config.output_dir)
+            prior_state = prior
             previous_export_completed = prior.export_completed
             previous_export_had_channel_failures = any(
                 warning.get("type") == "dce_channel_failed" for warning in prior.warnings
@@ -582,6 +628,7 @@ async def run_migration(
             # CLEAR completed_channel_ids so every channel is re-entered (new messages may exist).
             state.channel_message_offsets = dict(prior.channel_message_offsets)
             state.channel_high_water = dict(prior.channel_high_water)
+            state.staged_input = prior.staged_input
             # #76: carry failed messages forward (as independent copies) so an
             # incremental run self-heals prior failures instead of wiping the record.
             state.failed_messages = [dataclasses.replace(fm) for fm in prior.failed_messages]
@@ -747,6 +794,28 @@ async def run_migration(
                 )
             on_event(event)
 
+        decision = ExportDecision("full", (), None, None, "not incremental")
+        if config.incremental:
+            try:
+                async with new_session() as session:
+                    source_ids, complete = await fetch_export_source_ids(
+                        session, config.discord_token or "", config.discord_server_id or ""
+                    )
+                inventory = SourceInventory(source_ids, complete)
+            except DiscordAuthError:
+                raise
+            except (aiohttp.ClientError, MigrationError):
+                inventory = SourceInventory((), False)
+            previous_complete = bool(
+                prior_state
+                and _has_complete_full_witness(prior_state, config.output_dir, inventory.ids)
+            )
+            decision = select_export_decision(
+                inventory, state.channel_high_water, _failed_ids(state), previous_complete
+            )
+            active_export_dir = create_stage(config.output_dir, uuid.uuid4().hex)
+            on_event(MigrationEvent("export", "notice", _decision_message(decision)))
+
         reuse_media, reuse_media_reason = _export_media_reuse_policy(
             config,
             previous_export_completed=previous_export_completed,
@@ -756,27 +825,40 @@ async def run_migration(
         if export_checkpoint_state is not None:
             export_checkpoint_state.export_completed = False
             save_state(export_checkpoint_state, config.output_dir)
+        effective_config = dataclasses.replace(config, export_dir=active_export_dir)
+        request = ExportRequest(
+            active_export_dir,
+            decision.after_id,
+            decision.before_id,
+            active_export_dir / "media",
+            reuse_media,
+        )
         if reuse_media:
             await run_dce_export(
-                config,
+                effective_config,
                 dce_path,
                 record_export_event,
                 reuse_media=True,
+                request=request,
             )
         elif reuse_media_reason is not None:
             await run_dce_export(
-                config,
+                effective_config,
                 dce_path,
                 record_export_event,
                 reuse_media_reason=reuse_media_reason,
+                request=request,
             )
         else:
-            await run_dce_export(config, dce_path, record_export_event)
+            await run_dce_export(effective_config, dce_path, record_export_event, request=request)
         state.export_completed = not export_had_channel_failures
         save_state(state, config.output_dir)
         on_event(MigrationEvent(phase="export", status="completed", message="Export complete."))
     else:
         on_event(MigrationEvent(phase="export", status="skipped", message="Using existing exports"))
+
+    if active_export_dir != config.export_dir:
+        config = dataclasses.replace(config, export_dir=active_export_dir)
 
     # Phase 0b: Fetch Discord guild metadata (permissions, NSFW flags)
     # Independent of skip_export — runs whenever discord_token is available.
@@ -860,9 +942,9 @@ async def run_migration(
 
     # Phase 1: VALIDATE — parse exports inline
     on_event(MigrationEvent(phase="validate", status="started", message="Parsing exports..."))
-    exports = parse_export_directory(config.export_dir, metadata_only=True)
+    exports = parse_export_directory(active_export_dir, metadata_only=True)
     # Validate and collect author names in a single pass over all messages.
-    warnings = validate_export(exports, config.export_dir, author_names=state.author_names)
+    warnings = validate_export(exports, active_export_dir, author_names=state.author_names)
     for w in warnings:
         state.warnings.append(w)
         on_event(MigrationEvent(phase="validate", status="warning", message=w["message"]))
