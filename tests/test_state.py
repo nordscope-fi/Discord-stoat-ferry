@@ -1,5 +1,6 @@
 """Tests for migration state persistence."""
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,138 @@ def test_thread_parent_ids_round_trip_and_default_for_old_state(tmp_path: Path) 
     assert load_state(tmp_path).thread_parent_ids == state.thread_parent_ids
     (tmp_path / "state.json").write_text('{"channel_map": {}}', encoding="utf-8")
     assert load_state(tmp_path).thread_parent_ids == {}
+
+
+def test_staged_input_witness_roundtrips_and_legacy_state_defaults(tmp_path: Path) -> None:
+    from discord_ferry import state as state_module
+
+    witness = state_module.StagedInputWitness(
+        "staged-exports/run-1",
+        ("1543572361285083187",),
+        hashlib.sha256("1543572361285083187".encode("ascii")).hexdigest(),
+        "full",
+        True,
+        True,
+    )
+    save_state(MigrationState(staged_input=witness), tmp_path)
+    assert load_state(tmp_path).staged_input == witness
+    (tmp_path / "state.json").write_text('{"export_completed": true}')
+    assert load_state(tmp_path).staged_input is None
+
+
+def test_staged_input_witness_refuses_escape_and_bad_digest(tmp_path: Path) -> None:
+    from discord_ferry import state as state_module
+
+    escaped = state_module.StagedInputWitness("../outside", (), "a" * 64, "full", True, True)
+    with pytest.raises(StateError, match="staged input"):
+        MigrationState(staged_input=escaped).validated_stage_path(tmp_path)
+    stage = tmp_path / "staged-exports" / "run-1"
+    stage.mkdir(parents=True)
+    bad = state_module.StagedInputWitness(
+        "staged-exports/run-1", ("1543572361285083187",), "a" * 64, "full", True, True
+    )
+    with pytest.raises(StateError, match="digest"):
+        MigrationState(staged_input=bad).validated_stage_path(tmp_path)
+
+
+def test_staged_input_witness_allows_linked_ancestor_above_output_root(tmp_path: Path) -> None:
+    from discord_ferry import state as state_module
+
+    actual = tmp_path / "actual"
+    stage = actual / "nested" / "output" / "staged-exports" / "accepted"
+    stage.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    output_root = alias / "nested" / "output"
+    source_ids = ("1543572361285083187",)
+    witness = state_module.StagedInputWitness(
+        "staged-exports/accepted",
+        source_ids,
+        hashlib.sha256("\n".join(source_ids).encode("ascii")).hexdigest(),
+        "full",
+        True,
+        True,
+    )
+
+    assert MigrationState(staged_input=witness).validated_stage_path(output_root) == (
+        stage.resolve()
+    )
+
+
+def test_staged_input_witness_refuses_link_inside_output_root(tmp_path: Path) -> None:
+    from discord_ferry import state as state_module
+
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    (output_root / "staged-exports").symlink_to(external, target_is_directory=True)
+    source_ids = ("1543572361285083187",)
+    witness = state_module.StagedInputWitness(
+        "staged-exports/accepted",
+        source_ids,
+        hashlib.sha256("\n".join(source_ids).encode("ascii")).hexdigest(),
+        "full",
+        True,
+        True,
+    )
+
+    with pytest.raises(StateError, match="staged export path"):
+        MigrationState(staged_input=witness).validated_stage_path(output_root)
+
+
+@pytest.mark.parametrize(
+    "witness",
+    [
+        {
+            "relative_path": "/tmp/stage",
+            "source_ids": [],
+            "digest": "0" * 64,
+            "scope": "full",
+            "input_valid": True,
+            "coverage_complete": False,
+        },
+        {
+            "relative_path": "staged-exports/run",
+            "source_ids": ["2", "1"],
+            "digest": "0" * 64,
+            "scope": "full",
+            "input_valid": True,
+            "coverage_complete": False,
+        },
+        {
+            "relative_path": "staged-exports/run",
+            "source_ids": ["0"],
+            "digest": "0" * 64,
+            "scope": "full",
+            "input_valid": True,
+            "coverage_complete": False,
+        },
+        {
+            "relative_path": "staged-exports/run",
+            "source_ids": [],
+            "digest": "x" * 64,
+            "scope": "full",
+            "input_valid": True,
+            "coverage_complete": False,
+        },
+        {
+            "relative_path": "staged-exports/run",
+            "source_ids": [],
+            "digest": "0" * 64,
+            "scope": "legacy",
+            "input_valid": True,
+            "coverage_complete": False,
+        },
+    ],
+)
+def test_state_refuses_malformed_staged_input_witness(
+    tmp_path: Path, witness: dict[str, object]
+) -> None:
+    (tmp_path / "state.json").write_text(json.dumps({"staged_input": witness}))
+
+    with pytest.raises(StateError, match="staged input"):
+        load_state(tmp_path)
 
 
 def test_delivery_receipt_roundtrip_is_structural(tmp_path: Path) -> None:
@@ -1396,6 +1529,7 @@ _KNOWN_STATE_FIELDS = frozenset(
         "completed_at",
         "is_dry_run",
         "export_completed",
+        "staged_input",  # Structural relative path, IDs, digest, scope, and booleans.
         "autumn_uploads",
         "referenced_autumn_ids",
         "roles_finalized",
