@@ -497,6 +497,228 @@ async def test_incremental_marker_gap_uses_full_owned_stage(
     assert any("full export" in event.message.lower() for event in events)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_accepted_stage_reaches_parser_and_message_media_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry.state import save_state
+
+    guild_id = "1543572361285083187"
+    stale_id = "1543572393384087642"
+    cache = tmp_path / "dce_cache" / guild_id
+    cache.mkdir(parents=True)
+
+    def write_export(directory: Path, source_id: str) -> None:
+        payload = json.loads((FIXTURES_DIR / "simple_channel.json").read_text())
+        payload["channel"]["id"] = source_id
+        payload["messages"] = []
+        payload["messageCount"] = 0
+        (directory / f"{source_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    write_export(cache, stale_id)
+    (cache / "media").mkdir()
+    (cache / "media" / "handoff.bin").write_bytes(b"stale-cache")
+    save_state(MigrationState(channel_high_water={guild_id: ""}), tmp_path)
+    config = _make_config(
+        tmp_path,
+        skip_export=False,
+        incremental=True,
+        export_dir=cache,
+        discord_token=None,
+        discord_server_id=guild_id,
+    )
+
+    async def write_requested_stage(
+        _config: FerryConfig,
+        _dce_path: Path,
+        _on_event: EventCallback,
+        *,
+        request: ExportRequest,
+        **_kwargs: object,
+    ) -> Path:
+        write_export(request.output_dir, guild_id)
+        request.media_dir.mkdir(exist_ok=True)
+        (request.media_dir / "handoff.bin").write_bytes(b"accepted-stage")
+        return request.output_dir
+
+    observed: dict[str, object] = {}
+
+    async def observe_messages(
+        phase_config: FerryConfig,
+        _state: MigrationState,
+        exports: list[DCEExport],
+        _emit: EventCallback,
+    ) -> None:
+        observed["export_dir"] = phase_config.export_dir
+        observed["source_ids"] = tuple(export.channel.id for export in exports)
+        observed["media"] = (phase_config.export_dir / "media" / "handoff.bin").read_bytes()
+
+    monkeypatch.setattr(
+        engine_module, "fetch_export_source_ids", AsyncMock(return_value=((guild_id,), True))
+    )
+    monkeypatch.setattr(engine_module, "validate_discord_token", AsyncMock())
+    monkeypatch.setattr(engine_module, "get_dce_path", lambda: Path("/dce"))
+    monkeypatch.setattr(
+        engine_module, "run_dce_export", AsyncMock(side_effect=write_requested_stage)
+    )
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+
+    await run_migration(
+        config,
+        lambda _event: None,
+        phase_overrides={**_NOOP_OVERRIDES, "messages": observe_messages},
+    )
+
+    accepted = observed["export_dir"]
+    assert isinstance(accepted, Path)
+    assert accepted.parent == tmp_path / "staged-exports"
+    assert observed["source_ids"] == (guild_id,)
+    assert observed["media"] == b"accepted-stage"
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_malformed_bounded_tail_falls_back_before_message_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry.exporter.staging import create_stage, inspect_stage
+    from discord_ferry.state import save_state
+
+    guild_id = "1543572361285083187"
+    payload = json.loads((FIXTURES_DIR / "simple_channel.json").read_text())
+    payload["channel"]["id"] = guild_id
+    previous = create_stage(tmp_path, "previous")
+    (previous / f"{guild_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+    witness = dataclasses.replace(inspect_stage(previous, tmp_path, "full"), coverage_complete=True)
+    save_state(
+        MigrationState(
+            channel_high_water={guild_id: "1543572360000000000"},
+            export_completed=True,
+            staged_input=witness,
+        ),
+        tmp_path,
+    )
+    runs = AsyncMock()
+
+    async def write_requested_stage(
+        _config: FerryConfig,
+        _dce_path: Path,
+        _on_event: EventCallback,
+        *,
+        request: ExportRequest,
+        **_kwargs: object,
+    ) -> Path:
+        encoded = json.dumps(payload)
+        if request.after_id is not None:
+            encoded = encoded[:-1]
+        (request.output_dir / f"{guild_id}.json").write_text(encoded, encoding="utf-8")
+        return request.output_dir
+
+    runs.side_effect = write_requested_stage
+    messages = AsyncMock()
+    config = _make_config(
+        tmp_path,
+        skip_export=False,
+        incremental=True,
+        export_dir=tmp_path / "dce_cache" / guild_id,
+        discord_token=None,
+        discord_server_id=guild_id,
+    )
+    monkeypatch.setattr(
+        engine_module, "fetch_export_source_ids", AsyncMock(return_value=((guild_id,), True))
+    )
+    monkeypatch.setattr(engine_module, "validate_discord_token", AsyncMock())
+    monkeypatch.setattr(engine_module, "get_dce_path", lambda: Path("/dce"))
+    monkeypatch.setattr(engine_module, "run_dce_export", runs)
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+
+    await run_migration(
+        config,
+        lambda _event: None,
+        phase_overrides={**_NOOP_OVERRIDES, "messages": messages},
+    )
+
+    assert runs.await_count == 2
+    assert messages.await_count == 1
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_extra_bounded_source_runs_one_full_retry_before_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry.exporter.staging import create_stage, inspect_stage
+    from discord_ferry.state import save_state
+
+    guild_id = "1543572361285083187"
+    thread_id = "1543572368977428611"
+    extra_id = "1543572393384087642"
+
+    def write_stage(stage: Path, source_ids: tuple[str, ...]) -> None:
+        payload = json.loads((FIXTURES_DIR / "simple_channel.json").read_text())
+        for source_id in source_ids:
+            current = dict(payload)
+            current["channel"] = dict(payload["channel"], id=source_id)
+            current["messages"] = []
+            (stage / f"{source_id}.json").write_text(json.dumps(current))
+
+    previous = create_stage(tmp_path, "previous")
+    write_stage(previous, (guild_id, thread_id))
+    witness = dataclasses.replace(inspect_stage(previous, tmp_path, "full"), coverage_complete=True)
+    save_state(
+        MigrationState(
+            channel_high_water={guild_id: "1543572393384087642", thread_id: extra_id},
+            export_completed=True,
+            staged_input=witness,
+        ),
+        tmp_path,
+    )
+    runs = AsyncMock()
+
+    async def write_requested_stage(
+        _config: FerryConfig,
+        _dce_path: Path,
+        _on_event: EventCallback,
+        *,
+        request: ExportRequest,
+        **_kwargs: object,
+    ) -> Path:
+        write_stage(
+            request.output_dir,
+            (
+                (guild_id, thread_id, extra_id)
+                if request.after_id is not None
+                else (guild_id, thread_id)
+            ),
+        )
+        return request.output_dir
+
+    runs.side_effect = write_requested_stage
+    messages = AsyncMock()
+    config = _make_config(
+        tmp_path,
+        skip_export=False,
+        incremental=True,
+        export_dir=tmp_path / "dce_cache" / guild_id,
+        discord_token=None,
+        discord_server_id=guild_id,
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "fetch_export_source_ids",
+        AsyncMock(return_value=((guild_id, thread_id), True)),
+    )
+    monkeypatch.setattr(engine_module, "validate_discord_token", AsyncMock())
+    monkeypatch.setattr(engine_module, "get_dce_path", lambda: Path("/dce"))
+    monkeypatch.setattr(engine_module, "run_dce_export", runs)
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+
+    await run_migration(
+        config, lambda _event: None, phase_overrides={**_NOOP_OVERRIDES, "messages": messages}
+    )
+
+    assert runs.await_count == 2
+    assert messages.await_count == 1
+
+
 @pytest.fixture
 def migration_preflight_unit_boundary(
     monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest

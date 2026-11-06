@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -10,10 +12,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from discord_ferry.config import FerryConfig
-from discord_ferry.core.engine import PhaseFunction, run_migration
+from discord_ferry.core.engine import PhaseFunction, _media_seed_source, run_migration
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.discord.metadata import DiscordMetadata, save_discord_metadata
 from discord_ferry.errors import ExportError
+from discord_ferry.exporter.staging import create_stage, inspect_stage, seed_stage_media
 from discord_ferry.state import MigrationState, load_state, save_state
 from tests.stoat_ids import stoat_id
 from tests.test_engine import migration_preflight_unit_boundary as migration_preflight_unit_boundary
@@ -74,6 +77,9 @@ def _orchestrated_config(
 
 
 def _save_completed_export(output_dir: Path) -> None:
+    legacy_media = output_dir / "dce_cache" / _GUILD_ID / "simple_channel.json_Files"
+    legacy_media.mkdir(parents=True, exist_ok=True)
+    (legacy_media / "generated-name.png").write_bytes(b"cached-media")
     save_state(
         MigrationState(
             export_completed=True,
@@ -93,11 +99,47 @@ def _save_completed_export(output_dir: Path) -> None:
     )
 
 
+def test_stage_media_seed_uses_validated_complete_full_witness(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    accepted = create_stage(output_dir, "accepted")
+    (accepted / "media").mkdir()
+    (accepted / "media" / "1543572361285083187-1.png").write_bytes(b"accepted")
+    witness = inspect_stage(accepted, output_dir, "full")
+    state = MigrationState(
+        export_completed=True,
+        started_at="2026-10-13T00:00:00+00:00",
+        staged_input=replace(witness, coverage_complete=True),
+    )
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id=_GUILD_ID,
+            fetched_at="2026-10-13T00:00:01+00:00",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata={},
+        ),
+        output_dir,
+    )
+    config = _orchestrated_config(output_dir)
+
+    source, reason = _media_seed_source(state, config, True, False, state.started_at)
+    target = create_stage(output_dir, "target")
+
+    assert reason is None and source == accepted
+    assert seed_stage_media(source, target, eligible=True) is True
+    assert (target / "media" / "1543572361285083187-1.png").read_bytes() == b"accepted"
+
+
 async def _run_with_mock_export(
     config: FerryConfig,
     run_dce: AsyncMock,
 ) -> MigrationState:
+    source_id = str(json.loads(_FIXTURE.read_text(encoding="utf-8"))["channel"]["id"])
     with (
+        patch(
+            "discord_ferry.core.engine.fetch_export_source_ids",
+            new=AsyncMock(return_value=((source_id,), True)),
+        ),
         patch("discord_ferry.core.engine.validate_discord_token", new=AsyncMock()),
         patch("discord_ferry.core.engine.get_dce_path", return_value=Path("/dce")),
         patch("discord_ferry.core.engine.run_dce_export", new=run_dce),
