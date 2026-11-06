@@ -25,7 +25,13 @@ from discord_ferry.core.engine import (
     run_retry_failed,
 )
 from discord_ferry.core.events import EventCallback, MigrationEvent
-from discord_ferry.errors import CheckError, ExportError, MigrationError
+from discord_ferry.discord.metadata import (
+    DiscordMetadata,
+    capture_permission_source,
+    save_discord_metadata,
+)
+from discord_ferry.discord.models import DiscordChannel, DiscordRole
+from discord_ferry.errors import CheckError, ExportError, MigrationError, PermissionSafetyError
 from discord_ferry.migrator import delivery as delivery_module
 from discord_ferry.migrator import messages as messages_module
 from discord_ferry.migrator.api import ServerReadView
@@ -194,6 +200,218 @@ def _make_config(tmp_path: Path, **overrides: object) -> FerryConfig:
     return FerryConfig(**defaults)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    ("channel_type", "parent_id", "state"),
+    [
+        (12, "100000000000000010", MigrationState()),
+        (0, "100000000000000010", MigrationState()),
+        (99, "100000000000000010", MigrationState()),
+        (11, "not-a-snowflake", MigrationState()),
+        (
+            11,
+            "100000000000000010",
+            MigrationState(thread_parent_ids={"100000000000000011": "100000000000000012"}),
+        ),
+        (
+            11,
+            "100000000000000010",
+            MigrationState(channel_map={"100000000000000011": "target-thread"}),
+        ),
+    ],
+)
+async def test_public_thread_classifier_refuses_before_source_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    channel_type: int,
+    parent_id: str,
+    state: MigrationState,
+) -> None:
+    export = DCEExport(
+        DCEGuild("100000000000000001", "source"),
+        DCEChannel("100000000000000011", channel_type, "thread", category_id=parent_id),
+        is_thread=True,
+    )
+    fetch = AsyncMock()
+    monkeypatch.setattr(engine_module, "fetch_channel", fetch)
+    with pytest.raises(PermissionSafetyError):
+        await engine_module._classify_selected_public_threads(
+            _make_config(tmp_path, discord_token="source-token"),
+            state,
+            [export],
+            AsyncMock(),
+            lambda _event: None,
+        )
+    fetch.assert_not_awaited()
+
+
+def _seed_verified_public_thread(
+    tmp_path: Path, *, parent_nsfw: bool
+) -> tuple[DCEExport, DiscordChannel, DiscordChannel]:
+    guild_id = "100000000000000001"
+    parent_id = "100000000000000010"
+    child_id = "100000000000000011"
+    role = DiscordRole(
+        guild_id,
+        "@everyone",
+        0,
+        capture_fields=frozenset({"id", "permissions", "position", "managed"}),
+    )
+    child = DiscordChannel(
+        child_id,
+        "public",
+        11,
+        guild_id=guild_id,
+        parent_id=parent_id,
+        thread_archived=False,
+        thread_locked=False,
+        capture_fields=frozenset(
+            {
+                "id",
+                "type",
+                "guild_id",
+                "parent_id",
+                "thread_metadata.archived",
+                "thread_metadata.locked",
+            }
+        ),
+    )
+    parent = DiscordChannel(
+        parent_id,
+        "parent",
+        0,
+        guild_id=guild_id,
+        nsfw=parent_nsfw,
+        capture_fields=frozenset({"id", "type", "guild_id", "permission_overwrites", "nsfw"}),
+    )
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id=guild_id,
+            fetched_at="now",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata={},
+            permission_source=capture_permission_source(guild_id, [role], [child, parent]),
+        ),
+        tmp_path,
+    )
+    return (
+        DCEExport(
+            DCEGuild(guild_id, "source"),
+            DCEChannel(child_id, 11, "public", category_id=parent_id),
+            is_thread=True,
+        ),
+        child,
+        parent,
+    )
+
+
+@pytest.mark.parametrize(
+    ("parent_nsfw", "target", "refuses"),
+    [
+        (True, {"nsfw": True}, False),
+        (True, {"nsfw": False}, True),
+        (False, {"nsfw": True}, True),
+        (False, {}, False),
+        (False, {"nsfw": "not-a-bool"}, True),
+    ],
+)
+async def test_public_thread_classifier_requires_carried_target_nsfw_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_nsfw: bool,
+    target: dict[str, object],
+    refuses: bool,
+) -> None:
+    export, child, parent = _seed_verified_public_thread(tmp_path, parent_nsfw=parent_nsfw)
+    child_id = export.channel.id
+    source_fetch = AsyncMock(side_effect=[child, parent])
+    target_fetch = AsyncMock(return_value=target)
+    monkeypatch.setattr(engine_module, "fetch_channel", source_fetch)
+    monkeypatch.setattr(engine_module, "api_fetch_channel", target_fetch)
+    state = MigrationState(
+        channel_map={child_id: "target-thread"},
+        thread_parent_ids={child_id: parent.id},
+    )
+    session = AsyncMock()
+
+    if refuses:
+        with pytest.raises(PermissionSafetyError) as caught:
+            await engine_module._classify_selected_public_threads(
+                _make_config(tmp_path, discord_token="source-token"),
+                state,
+                [export],
+                session,
+                lambda _event: None,
+            )
+        assert caught.value.outcome.effects == "none_confirmed"
+    else:
+        await engine_module._classify_selected_public_threads(
+            _make_config(tmp_path, discord_token="source-token"),
+            state,
+            [export],
+            session,
+            lambda _event: None,
+        )
+    target_fetch.assert_awaited_once_with(
+        session, "https://api.test", "test-token", "target-thread"
+    )
+
+
+async def test_public_thread_classifier_keeps_carried_target_preview_source_only_in_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    export, child, parent = _seed_verified_public_thread(tmp_path, parent_nsfw=True)
+    source_fetch = AsyncMock(side_effect=[child, parent])
+    target_fetch = AsyncMock()
+    monkeypatch.setattr(engine_module, "fetch_channel", source_fetch)
+    monkeypatch.setattr(engine_module, "api_fetch_channel", target_fetch)
+    state = MigrationState(
+        channel_map={export.channel.id: "target-thread"},
+        thread_parent_ids={export.channel.id: parent.id},
+    )
+
+    await engine_module._classify_selected_public_threads(
+        _make_config(tmp_path, discord_token="source-token", dry_run=True),
+        state,
+        [export],
+        AsyncMock(),
+        lambda _event: None,
+    )
+
+    target_fetch.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("field", "value"), [("nsfw", "not-a-bool"), ("type", False)])
+async def test_public_thread_classifier_refuses_malformed_fetched_parent_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    export, child, parent = _seed_verified_public_thread(tmp_path, parent_nsfw=False)
+    setattr(parent, field, value)
+    source_fetch = AsyncMock(side_effect=[child, parent])
+    target_fetch = AsyncMock()
+    monkeypatch.setattr(engine_module, "fetch_channel", source_fetch)
+    monkeypatch.setattr(engine_module, "api_fetch_channel", target_fetch)
+    state = MigrationState(
+        channel_map={export.channel.id: "target-thread"},
+        thread_parent_ids={export.channel.id: parent.id},
+    )
+    metadata_path = tmp_path / "discord_metadata.json"
+    before = metadata_path.read_bytes()
+
+    with pytest.raises(PermissionSafetyError) as caught:
+        await engine_module._classify_selected_public_threads(
+            _make_config(tmp_path, discord_token="source-token"),
+            state,
+            [export],
+            AsyncMock(),
+            lambda _event: None,
+        )
+
+    assert caught.value.outcome.effects == "none_confirmed"
+    assert metadata_path.read_bytes() == before
+    target_fetch.assert_not_awaited()
+
+
 @pytest.fixture
 def migration_preflight_unit_boundary(
     monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
@@ -214,6 +432,7 @@ def migration_preflight_unit_boundary(
         )
     )
     monkeypatch.setattr(engine_module, "_prepare_permission_operation", operation)
+    monkeypatch.setattr(engine_module, "_classify_selected_public_threads", AsyncMock())
     return operation
 
 
@@ -4641,7 +4860,7 @@ async def test_retry_delivery_checkpoint_removes_resolved_failure_before_retirem
 async def test_forum_index_rebuild_skipped_when_dry_run(tmp_path: Path) -> None:
     """_rebuild_forum_indexes is NOT called in dry_run mode."""
     events: list[MigrationEvent] = []
-    config = _make_config(tmp_path, dry_run=True)
+    config = _make_config(tmp_path, dry_run=True, skip_threads=True)
 
     with patch("discord_ferry.core.engine._rebuild_forum_indexes") as mock_rebuild:
 
@@ -5492,7 +5711,9 @@ async def test_preflight_emits_and_persists_a_proxy_notice(
     events: list[MigrationEvent] = []
     with os_proxy({}), proxy_env(ALL_PROXY="socks5://sock:1080"):
         state = await run_migration(
-            _make_config(tmp_path, dry_run=True), events.append, phase_overrides=_NOOP_OVERRIDES
+            _make_config(tmp_path, dry_run=True, skip_threads=True),
+            events.append,
+            phase_overrides=_NOOP_OVERRIDES,
         )
 
     assert any(e.status == "notice" and e.phase == "preflight" for e in events)

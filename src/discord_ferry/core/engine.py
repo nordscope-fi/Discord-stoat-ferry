@@ -48,7 +48,13 @@ from discord_ferry.discord import (
     resume_refusal,
     save_discord_metadata,
 )
-from discord_ferry.discord.metadata import _bad_id, validate_permission_source
+from discord_ferry.discord.client import fetch_channel
+from discord_ferry.discord.metadata import (
+    _bad_id,
+    _capture_source_channel,
+    _permission_source_fingerprint,
+    validate_permission_source,
+)
 from discord_ferry.errors import (
     DeliveryUnresolvedError,
     MigrationError,
@@ -75,6 +81,7 @@ from discord_ferry.migrator.api import (
     api_edit_role,
     api_edit_role_ranks,
     api_edit_server,
+    api_fetch_channel,
     api_fetch_root,
     api_fetch_self,
     api_fetch_server,
@@ -159,6 +166,7 @@ if TYPE_CHECKING:
 
     from discord_ferry.blueprint import BlueprintChannel, ServerBlueprint
     from discord_ferry.discord.metadata import ChannelMeta
+    from discord_ferry.discord.models import DiscordChannel
     from discord_ferry.migrator.api import ServerReadView
     from discord_ferry.migrator.delivery import DeliveryResult
 
@@ -166,6 +174,138 @@ if TYPE_CHECKING:
     # check_cmd reaches it, so the verify module stays off the engine's import
     # path at runtime.
     from discord_ferry.migrator.verify import CheckResult, RepairOutcome
+
+
+_ORDINARY_GUILD_CHANNEL_TYPES = frozenset({0, 2, 4, 5, 13, 15, 16})
+
+
+async def _classify_selected_public_threads(
+    config: FerryConfig,
+    state: MigrationState,
+    exports: list[DCEExport],
+    session: aiohttp.ClientSession,
+    on_event: EventCallback,
+) -> None:
+    """Bind eligible public-thread facts before target preflight or dry placeholders."""
+    _permission_preflight_cancel(config)
+    selected = [export for export in exports if export.is_thread and not config.skip_threads]
+    if not selected:
+        return
+    seen_children: set[str] = set()
+    for export in selected:
+        child_id, parent_id = export.channel.id, export.channel.category_id
+        if (
+            child_id in seen_children
+            or _bad_id("public thread", child_id) is not None
+            or _bad_id("public thread parent", parent_id) is not None
+        ):
+            _permission_preflight_unverified("Bind each public thread to one valid parent id")
+        seen_children.add(child_id)
+        if export.channel.type == 12:
+            _permission_preflight_unverified("Private thread access cannot be reproduced")
+        if export.channel.type not in {10, 11}:
+            _permission_preflight_unverified("Only proved public thread types can be reproduced")
+        recorded_parent = state.thread_parent_ids.get(child_id)
+        if child_id in state.channel_map and recorded_parent is None:
+            _permission_preflight_unverified(
+                "Refuse a carried public thread without a parent binding"
+            )
+        if recorded_parent not in {None, parent_id}:
+            _permission_preflight_unverified("Refuse a changed public thread parent binding")
+    if not config.discord_token:
+        _permission_preflight_unverified(
+            "Refresh public thread source evidence with a Discord token"
+        )
+    guild_ids = {export.guild.id for export in selected}
+    if len(guild_ids) != 1 or any(_bad_id("source guild", guild_id) for guild_id in guild_ids):
+        _permission_preflight_unverified("Bind public threads to one valid source guild")
+    meta = load_bound_discord_metadata(config, exports)
+    if meta is None or meta.permission_source is None or meta.guild_id not in guild_ids:
+        _permission_preflight_unverified("Refresh complete bound public thread source evidence")
+    fetched: dict[str, DiscordChannel] = {}
+    for export in selected:
+        child_id, parent_id = export.channel.id, export.channel.category_id
+        try:
+            child = await fetch_channel(session, config.discord_token, child_id)
+            parent = await fetch_channel(session, config.discord_token, parent_id)
+        except Exception as exc:  # noqa: BLE001
+            raise PermissionSafetyError(
+                PermissionOutcome("preflight", "unverified", "none_confirmed")
+            ) from exc
+        if (
+            child.id != child_id
+            or child.guild_id != export.guild.id
+            or child.type != export.channel.type
+            or child.parent_id != parent_id
+            or child.thread_archived is not False
+            or child.thread_locked is not False
+            or not {"guild_id", "parent_id", "thread_metadata.archived", "thread_metadata.locked"}
+            <= child.capture_fields
+            or parent.id != parent_id
+            or parent.guild_id != export.guild.id
+            or parent.type not in _ORDINARY_GUILD_CHANNEL_TYPES
+            or not {"guild_id", "type", "permission_overwrites", "nsfw"} <= parent.capture_fields
+        ):
+            _permission_preflight_unverified(
+                "Refresh matching active public thread and parent facts"
+            )
+        fetched[child_id], fetched[parent_id] = child, parent
+    raw = meta.permission_source
+    channels = {channel.id: channel for channel in raw.channels}
+    if len(channels) != len(raw.channels):
+        _permission_preflight_unverified("Refresh unique source channel evidence")
+    try:
+        for channel_id, channel in fetched.items():
+            channels[channel_id] = _capture_source_channel(channel)
+    except ValueError:
+        _permission_preflight_unverified("Refresh complete public thread source facts")
+    refreshed = dataclasses.replace(
+        raw,
+        channels=tuple(channels[channel_id] for channel_id in sorted(channels)),
+        covered_channel_ids=frozenset(channels),
+        fingerprint="",
+    )
+    bound = dataclasses.replace(
+        meta,
+        permission_source=dataclasses.replace(
+            refreshed, fingerprint=_permission_source_fingerprint(refreshed)
+        ),
+    )
+    problems = validate_permission_source(
+        bound, frozenset(export.channel.id for export in selected)
+    )
+    if problems:
+        _permission_preflight_stop(problems)
+    for export in selected:
+        child_id, parent_id = export.channel.id, export.channel.category_id
+        target_id = state.channel_map.get(child_id)
+        if target_id is None:
+            continue
+        if config.dry_run:
+            continue
+        try:
+            target = await api_fetch_channel(session, config.stoat_url, config.token, target_id)
+        except Exception as exc:  # noqa: BLE001
+            raise PermissionSafetyError(
+                PermissionOutcome("preflight", "unverified", "none_confirmed")
+            ) from exc
+        parent = fetched[parent_id]
+        target_nsfw = target.get("nsfw", False) if isinstance(target, dict) else None
+        if (
+            not isinstance(target_nsfw, bool)
+            or not isinstance(parent.nsfw, bool)
+            or target_nsfw is not parent.nsfw
+        ):
+            _permission_preflight_unverified(
+                "Refuse a carried public thread target with a different age flag"
+            )
+    save_discord_metadata(bound, config.output_dir)
+    on_event(
+        MigrationEvent(
+            "validate", "progress", f"Verified {len(selected)} public thread source binding(s)"
+        )
+    )
+
 
 PhaseFunction = Callable[
     [FerryConfig, MigrationState, list[DCEExport], EventCallback],
@@ -388,6 +528,7 @@ async def run_migration(
             state.is_dry_run = config.dry_run
             # Carry over ID maps so structure phases are skipped / reused
             state.channel_map = dict(prior.channel_map)
+            state.thread_parent_ids = dict(prior.thread_parent_ids)
             state.role_map = dict(prior.role_map)
             state.delivery_namespace = prior.delivery_namespace
             state.delivery_service_digest = prior.delivery_service_digest
@@ -864,6 +1005,7 @@ async def run_migration(
         config.session = session
         lock_acquired = False
         try:
+            await _classify_selected_public_threads(config, state, exports, session, on_event)
             if not config.dry_run:
                 state.permission_runtime = await _prepare_permission_operation(
                     config, state, exports, session, mode="migration"
