@@ -13,7 +13,7 @@ import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
-from discord_ferry.errors import MigrationError
+from discord_ferry.errors import AutumnUploadError, MigrationError
 from discord_ferry.migrator import delivery as delivery_module
 from discord_ferry.migrator import messages as messages_module
 from discord_ferry.migrator.messages import (
@@ -2199,6 +2199,114 @@ async def test_embed_media_upload(tmp_path: Path, mock_aiohttp: aioresponses) ->
     await run_messages(config, state, [export], events.append)
     assert "msg_embed" in state.message_map
     assert state.attachments_uploaded >= 1
+
+
+@pytest.mark.usefixtures("publication_permission_collaborator")
+async def test_video_only_embed_uploads_then_sends_media(tmp_path: Path) -> None:
+    """A successful local-video upload makes a textless embed deliverable."""
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "video.mp4").write_bytes(b"video")
+    sent: list[dict[str, Any]] = []
+    msg = _make_message(
+        id="video_only",
+        content="",
+        embeds=[{"video": {"url": "media/video.mp4"}}],
+    )
+
+    with (
+        patch("discord_ferry.migrator.messages.upload_with_cache", return_value="autumn_video"),
+        patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)),
+    ):
+        await run_messages(
+            _make_config(tmp_path),
+            _make_state(),
+            [_make_export(messages=[msg])],
+            lambda event: None,
+        )
+
+    assert len(sent) == 1
+    assert sent[0].get("attachments") in (None, [])
+    assert (sent[0]["embeds"] or [])[0]["media"] == "autumn_video"
+
+
+@pytest.mark.usefixtures("publication_permission_collaborator")
+async def test_embed_media_uses_image_after_video_and_thumbnail_upload_failures(
+    tmp_path: Path,
+) -> None:
+    """A failed video and thumbnail upload leave the image as the final fallback."""
+    media = tmp_path / "media"
+    media.mkdir()
+    for name in ("video.mp4", "thumbnail.png", "image.png"):
+        (media / name).write_bytes(b"media")
+    sent: list[dict[str, Any]] = []
+    msg = _make_message(
+        id="video_fallback",
+        content="",
+        embeds=[
+            {
+                "video": {"url": "media/video.mp4"},
+                "thumbnail": {"url": "media/thumbnail.png"},
+                "image": {"url": "media/image.png"},
+            }
+        ],
+    )
+    with (
+        patch(
+            "discord_ferry.migrator.messages.upload_with_cache",
+            side_effect=[
+                AutumnUploadError("video failed"),
+                AutumnUploadError("thumb failed"),
+                "image_id",
+            ],
+        ) as upload,
+        patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)),
+    ):
+        await run_messages(
+            _make_config(tmp_path),
+            _make_state(),
+            [_make_export(messages=[msg])],
+            lambda event: None,
+        )
+
+    assert [call.args[3].name for call in upload.await_args_list] == [
+        "video.mp4",
+        "thumbnail.png",
+        "image.png",
+    ]
+    assert (sent[0]["embeds"] or [])[0]["media"] == "image_id"
+
+
+@pytest.mark.usefixtures("publication_permission_collaborator")
+async def test_textless_embed_without_successful_media_is_not_sent_as_an_embed(
+    tmp_path: Path,
+) -> None:
+    """A video-only embed is omitted when every candidate upload fails."""
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "video.mp4").write_bytes(b"video")
+    sent: list[dict[str, Any]] = []
+    msg = _make_message(
+        id="video_failed",
+        content="",
+        embeds=[{"video": {"url": "media/video.mp4"}}],
+    )
+    with (
+        patch(
+            "discord_ferry.migrator.messages.upload_with_cache",
+            side_effect=AutumnUploadError("video failed"),
+        ),
+        patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)),
+    ):
+        await run_messages(
+            _make_config(tmp_path),
+            _make_state(),
+            [_make_export(messages=[msg])],
+            lambda event: None,
+        )
+
+    assert len(sent) == 1
+    assert sent[0].get("embeds") in (None, [])
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")

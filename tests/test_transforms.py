@@ -224,14 +224,14 @@ def test_flatten_embed_full() -> None:
         ],
         "footer": {"text": "Footer text"},
     }
-    result, media_path, _ = flatten_embed(embed)
+    result, media_paths, _ = flatten_embed(embed)
 
     assert result["title"] == "My Title"
     assert result["url"] == "https://example.com"
     assert result["colour"] == 16711680
     assert "color" not in result
     assert result["icon_url"] == "https://example.com/icon.png"
-    assert media_path is None  # No export_dir provided.
+    assert media_paths == []  # No export_dir provided.
 
     description = result["description"]
     assert isinstance(description, str)
@@ -297,9 +297,9 @@ def test_flatten_embed_with_local_thumbnail(tmp_path: Path) -> None:
         "title": "With Thumb",
         "thumbnail": {"url": "thumb.png"},
     }
-    result, media_path, _ = flatten_embed(embed, export_dir=tmp_path)
+    result, media_paths, _ = flatten_embed(embed, export_dir=tmp_path)
     assert result["title"] == "With Thumb"
-    assert media_path == thumb_file
+    assert media_paths == [thumb_file]
 
 
 def test_flatten_embed_with_remote_thumbnail() -> None:
@@ -308,8 +308,29 @@ def test_flatten_embed_with_remote_thumbnail() -> None:
         "title": "Remote",
         "thumbnail": {"url": "https://cdn.discord.com/thumb.png"},
     }
-    result, media_path, _ = flatten_embed(embed, export_dir=Path("/tmp"))
-    assert media_path is None
+    result, media_paths, _ = flatten_embed(embed, export_dir=Path("/tmp"))
+    assert media_paths == []
+
+
+def test_flatten_embed_orders_local_video_before_still_images(tmp_path: Path) -> None:
+    """A usable local video precedes thumbnail and image candidates."""
+    video = tmp_path / "video.mp4"
+    thumbnail = tmp_path / "thumbnail.png"
+    image = tmp_path / "image.png"
+    for path in (video, thumbnail, image):
+        path.write_bytes(b"x")
+
+    _, media_paths, escaped = flatten_embed(
+        {
+            "video": {"url": video.name},
+            "thumbnail": {"url": thumbnail.name},
+            "image": {"url": image.name},
+        },
+        export_dir=tmp_path,
+    )
+
+    assert media_paths == [video, thumbnail, image]
+    assert escaped is False
 
 
 # ---------------------------------------------------------------------------
@@ -704,22 +725,22 @@ def test_strip_underline_mixed() -> None:
 
 
 def test_expired_cdn_embed_media_stripped() -> None:
-    """Expired Discord CDN thumbnail — media_path is None."""
+    """Expired Discord CDN thumbnail produces no local media candidates."""
     embed: dict[str, object] = {
         "title": "Post",
         "thumbnail": {"url": "https://cdn.discordapp.com/img.png?ex=60000000"},
     }
-    result, media_path, _ = flatten_embed(embed)
-    assert media_path is None
+    result, media_paths, _ = flatten_embed(embed)
+    assert media_paths == []
 
 
 def test_valid_cdn_embed_url_not_stripped() -> None:
-    """Valid CDN URL — media_path still None (remote, not local) but no warning."""
+    """Valid CDN URL remains remote and produces no local media candidates."""
     embed: dict[str, object] = {
         "image": {"url": "https://cdn.discordapp.com/img.png?ex=ffffffff"},
     }
-    result, media_path, _ = flatten_embed(embed)
-    assert media_path is None  # Still None — it's remote
+    result, media_paths, _ = flatten_embed(embed)
+    assert media_paths == []  # Remote media is not uploaded.
 
 
 def test_non_discord_embed_url_untouched() -> None:
@@ -727,8 +748,8 @@ def test_non_discord_embed_url_untouched() -> None:
     embed: dict[str, object] = {
         "thumbnail": {"url": "https://example.com/img.png"},
     }
-    result, media_path, _ = flatten_embed(embed)
-    assert media_path is None
+    result, media_paths, _ = flatten_embed(embed)
+    assert media_paths == []
 
 
 def test_local_media_path_still_works(tmp_path: Path) -> None:
@@ -737,8 +758,8 @@ def test_local_media_path_still_works(tmp_path: Path) -> None:
     local.parent.mkdir(parents=True, exist_ok=True)
     local.write_bytes(b"PNG")
     embed: dict[str, object] = {"image": {"url": "media/img.png"}}
-    result, media_path, _ = flatten_embed(embed, export_dir=tmp_path)
-    assert media_path == local
+    result, media_paths, _ = flatten_embed(embed, export_dir=tmp_path)
+    assert media_paths == [local]
 
 
 def test_unknown_cdn_format_preserved() -> None:
@@ -746,8 +767,8 @@ def test_unknown_cdn_format_preserved() -> None:
     embed: dict[str, object] = {
         "thumbnail": {"url": "https://cdn.discordapp.com/img.png"},
     }
-    result, media_path, _ = flatten_embed(embed)
-    assert media_path is None  # Remote, but no expiry warning
+    result, media_paths, _ = flatten_embed(embed)
+    assert media_paths == []  # Remote, but no expiry warning
 
 
 def test_media_discordapp_net_checked() -> None:
@@ -755,8 +776,8 @@ def test_media_discordapp_net_checked() -> None:
     embed: dict[str, object] = {
         "image": {"url": "https://media.discordapp.net/img.png?ex=60000000"},
     }
-    result, media_path, _ = flatten_embed(embed)
-    assert media_path is None  # Expired, stripped
+    result, media_paths, _ = flatten_embed(embed)
+    assert media_paths == []  # Expired, stripped
 
 
 # ---------------------------------------------------------------------------
@@ -933,10 +954,10 @@ def test_media_discordapp_net_is_consulted_for_expiry(tmp_path: Path) -> None:
     with patch(
         "discord_ferry.parser.transforms.check_cdn_url_expiry", return_value=True
     ) as checked:
-        _result, media_path, _ = flatten_embed({"image": {"url": url}}, export_dir=tmp_path)
+        _result, media_paths, _ = flatten_embed({"image": {"url": url}}, export_dir=tmp_path)
 
     checked.assert_called_once_with(url)
-    assert media_path is None, "an expired URL must not be offered as usable media"
+    assert media_paths == [], "an expired URL must not be offered as usable media"
 
 
 def test_local_embed_media_resolves_whatever_the_dce_hash_spelling(tmp_path: Path) -> None:
@@ -958,9 +979,9 @@ def test_local_embed_media_resolves_whatever_the_dce_hash_spelling(tmp_path: Pat
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-        _result, media_path, _ = flatten_embed({"image": {"url": rel}}, export_dir=tmp_path)
+        _result, media_paths, _ = flatten_embed({"image": {"url": rel}}, export_dir=tmp_path)
 
-        assert media_path == target, (
+        assert media_paths == [target], (
             f"a DCE asset named with the {hash_form!r} hash form did not resolve; "
             "Ferry must read the path from the JSON rather than matching the name"
         )
@@ -976,15 +997,15 @@ def test_flatten_embed_drops_escaped_media_and_reports(tmp_path: Path) -> None:
         "thumbnail": {"url": "link-marker.png"},
         "image": {"url": "inside.png"},
     }
-    flat, media_path, escaped = flatten_embed(embed, tmp_path)
+    flat, media_paths, escaped = flatten_embed(embed, tmp_path)
     assert escaped is True
-    assert media_path == (tmp_path / "inside.png").resolve()
+    assert media_paths == [(tmp_path / "inside.png").resolve()]
     assert "media" not in flat
 
 
 def test_flatten_embed_empty_media_url_is_absent(tmp_path: Path) -> None:
-    flat, media_path, escaped = flatten_embed({"title": "t", "thumbnail": {"url": ""}}, tmp_path)
-    assert media_path is None
+    flat, media_paths, escaped = flatten_embed({"title": "t", "thumbnail": {"url": ""}}, tmp_path)
+    assert media_paths == []
     assert escaped is False
     assert flat["title"] == "t"
 
@@ -1017,7 +1038,7 @@ def test_flatten_embed_safe_then_escaped_reports_escape(tmp_path: Path) -> None:
         "thumbnail": {"url": "inside.png"},
         "image": {"url": "link-marker.png"},
     }
-    flat, media_path, escaped = flatten_embed(embed, tmp_path)
+    flat, media_paths, escaped = flatten_embed(embed, tmp_path)
     assert escaped is True
-    assert media_path == (tmp_path / "inside.png").resolve()
+    assert media_paths == [(tmp_path / "inside.png").resolve()]
     assert flat["title"] == "t"
