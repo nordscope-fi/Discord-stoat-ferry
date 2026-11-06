@@ -164,3 +164,97 @@ def accept_stage(
         state.staged_input = previous
         raise
     _retain_current_and_previous(output_root, candidate, previous)
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(64 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _media_roots(previous_stage: Path) -> tuple[Path, ...] | None:
+    roots: list[Path] = []
+    try:
+        entries = tuple(previous_stage.iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        if entry.name == "media" or entry.name.endswith(".json_Files"):
+            if entry.is_symlink() or not entry.is_dir():
+                return None
+            roots.append(entry)
+    return tuple(sorted(roots))
+
+
+def _media_files(root: Path, previous_stage: Path) -> tuple[Path, ...] | None:
+    try:
+        paths = tuple(root.rglob("*"))
+        resolved_previous = previous_stage.resolve(strict=True)
+        resolved_root = root.resolve(strict=True)
+    except OSError:
+        return None
+    if not resolved_root.is_relative_to(resolved_previous):
+        return None
+    if any(path.is_symlink() or (not path.is_dir() and not path.is_file()) for path in paths):
+        return None
+    files = tuple(path for path in paths if path.is_file())
+    try:
+        if any(not path.resolve(strict=True).is_relative_to(resolved_root) for path in files):
+            return None
+    except OSError:
+        return None
+    return files
+
+
+def _safe_media_destination(destination: Path, stage: Path) -> bool:
+    if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+        return False
+    current = destination.parent
+    while current != stage:
+        if current.exists() and (current.is_symlink() or not current.is_dir()):
+            return False
+        if current == current.parent:
+            return False
+        current = current.parent
+    return True
+
+
+def seed_stage_media(previous_stage: Path, stage: Path, *, eligible: bool) -> bool:
+    """Copy only safely named media from an already validated cache into a stage."""
+    if not eligible or previous_stage.is_symlink() or not previous_stage.is_dir():
+        return False
+    try:
+        owned_stage = _owned_stage(stage, stage.parent.parent)
+        source_roots = _media_roots(previous_stage)
+        if not source_roots:
+            return False
+        planned: dict[Path, tuple[Path, str]] = {}
+        for source_root in source_roots:
+            media_files = _media_files(source_root, previous_stage)
+            if media_files is None:
+                return False
+            for source in media_files:
+                relative = source.relative_to(source_root)
+                digest = _file_digest(source)
+                existing = planned.get(relative)
+                if existing is not None and existing[1] != digest:
+                    return False
+                planned.setdefault(relative, (source, digest))
+        if not planned:
+            return False
+        for relative, (_source, digest) in planned.items():
+            destination = owned_stage / "media" / relative
+            if not _safe_media_destination(destination, owned_stage):
+                return False
+            if destination.exists() and digest != _file_digest(destination):
+                return False
+        for relative, (source, _digest) in planned.items():
+            destination = owned_stage / "media" / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if not destination.exists():
+                shutil.copyfile(source, destination)
+    except OSError:
+        return False
+    return True
