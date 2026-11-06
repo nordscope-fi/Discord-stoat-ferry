@@ -190,7 +190,7 @@ def flatten_embed(
     embed: dict[str, object],
     export_dir: Path | None = None,
     text_transform: Callable[[str], str] | None = None,
-) -> tuple[dict[str, object], Path | None, bool]:
+) -> tuple[dict[str, object], list[Path], bool]:
     """Convert a Discord embed dict to a Stoat-compatible SendableEmbed dict.
 
     Stoat supports title, description, url, icon_url, colour, and media.
@@ -202,10 +202,10 @@ def flatten_embed(
         text_transform: Optional remapping applied to the title, description, and fields.
 
     Returns:
-        Tuple of (embed dict, local media path or None, escaped). The media path
-        is set when a thumbnail or image has a local file (downloaded via
-        ``--media``). escaped is True when any local media url failed the
-        export-root containment check.
+        Tuple of (embed dict, ordered local media paths, escaped). The paths
+        contain usable local video, thumbnail, and image files in that order
+        (downloaded via ``--media``). escaped is True when any local media url
+        failed the export-root containment check.
     """
     parts: list[str] = []
 
@@ -289,11 +289,11 @@ def flatten_embed(
         desc = _truncate_utf8(desc, 2000, " [...]")
         result["description"] = desc
 
-    # Extract media path from thumbnail or image (local files from --media export).
-    media_path: Path | None = None
+    # Extract local media candidates from the --media export in source priority order.
+    media_paths: list[Path] = []
     escaped_media = False
     if export_dir is not None:
-        for media_key in ("thumbnail", "image"):
+        for media_key in ("video", "thumbnail", "image"):
             media_obj = embed.get(media_key)
             if isinstance(media_obj, dict):
                 media_url = media_obj.get("url", "")
@@ -305,12 +305,12 @@ def flatten_embed(
                     candidate = contained_media_path(export_dir, media_url)
                     if candidate is None:
                         escaped_media = True
-                    elif media_path is None and candidate.exists():
-                        media_path = candidate
+                    elif candidate.is_file() and candidate not in media_paths:
+                        media_paths.append(candidate)
 
     # Check remote Discord CDN URLs for expiry (only if no local file was found).
-    if media_path is None:
-        for media_key in ("thumbnail", "image"):
+    if not media_paths:
+        for media_key in ("video", "thumbnail", "image"):
             media_obj = embed.get(media_key)
             if isinstance(media_obj, dict):
                 media_url = media_obj.get("url", "")
@@ -321,9 +321,9 @@ def flatten_embed(
                     and check_cdn_url_expiry(media_url) is True
                 ):
                     logger.warning("Expired embed media URL stripped: %s", media_url)
-                    break  # Don't set media_path — expired URL stripped
+                    break  # Don't add a remote URL as a media candidate
 
-    return result, media_path, escaped_media
+    return result, media_paths, escaped_media
 
 
 def format_original_timestamp(iso_timestamp: str) -> str:

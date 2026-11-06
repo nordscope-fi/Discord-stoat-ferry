@@ -148,8 +148,8 @@ def test_attachment_embed_and_sticker_behaviors_execute() -> None:
     raw_message = _raw_message()
     assert message.embeds == raw_message["embeds"]
     assert message.stickers == raw_message["stickers"]
-    flattened, media_path, _ = flatten_embed(message.embeds[0])
-    assert media_path is None
+    flattened, media_paths, _ = flatten_embed(message.embeds[0])
+    assert media_paths == []
     assert flattened["title"] == "Poll closed"
     assert flattened["colour"] == "#5865f2"
     assert "42 votes" in str(flattened["description"])

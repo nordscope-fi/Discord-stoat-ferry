@@ -23,7 +23,7 @@ DiscordChatExporter export \
 |------|-------------------|
 | `--format Json` | Ferry's parser reads JSON only |
 | `--markdown false` | Without this flag DCE renders mention syntax (`<@123>`) as display names (`@Username`), destroying the IDs needed for remapping |
-| `--media` | Downloads all attachments, avatars, and emoji locally. Discord CDN URLs expire within ~24 hours |
+| `--media` | Downloads attachments, avatars, emoji, and embedded media locally. Discord CDN URLs expire within ~24 hours |
 | `--include-threads All` | Exports threads and forum posts as separate files alongside their parent channels |
 
 `--reuse-media` is optional. It skips every media file already present, without checking whether an
@@ -43,6 +43,9 @@ interrupted download left the file incomplete.
     If `--media` was omitted, attachment URLs in the export begin with `https://cdn.discordapp.com/`
     rather than a relative local path. Ferry cannot migrate these, Discord CDN URLs expire and Autumn
     cannot fetch URLs directly. Ferry's VALIDATE phase detects this condition and reports it as an error.
+
+    Embedded video is migrated only when the export holds a local path under the export directory.
+    Ferry does not fetch remote URLs.
 
 ---
 

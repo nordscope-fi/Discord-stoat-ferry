@@ -1841,7 +1841,7 @@ async def _process_message(
             )
         )
 
-    # Step 4: Flatten embeds (max 5, only those with title or description).
+    # Step 4: Flatten embeds and try their local media candidates (max 5).
     stoat_embeds: list[dict[str, Any]] = []
     embed_media_ids: list[str] = []
 
@@ -1850,58 +1850,64 @@ async def _process_message(
         return remap_emoji(remapped, state.emoji_map)
 
     for raw_embed in msg.embeds[:5]:
-        flat, embed_media_path, _embed_escaped = flatten_embed(
+        flat, embed_media_paths, _embed_escaped = flatten_embed(
             raw_embed,
             config.export_dir,
             remap_embed_text,
         )
-        if flat.get("description") or flat.get("title"):
-            if _embed_escaped:
+        if _embed_escaped:
+            acc_warnings.append(
+                {
+                    "phase": "messages",
+                    "type": "unsafe_media_path",
+                    "message": (
+                        f"Embed media in msg {msg.id} failed the export-root "
+                        "containment check; skipped."
+                    ),
+                }
+            )
+            on_event(
+                MigrationEvent(
+                    phase="messages",
+                    status="warning",
+                    message=f"Embed media in msg {msg.id} unsafe path; skipped.",
+                )
+            )
+        media_id: str | None = None
+        for embed_media_path in embed_media_paths:
+            try:
+                media_id = await upload_with_cache(
+                    session,
+                    state.autumn_url,
+                    "attachments",
+                    embed_media_path,
+                    config.token,
+                    state.upload_cache,
+                    config.upload_delay,
+                    skip_cache=True,
+                )
+            except PermissionSafetyError:
+                raise
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
                 acc_warnings.append(
                     {
                         "phase": "messages",
-                        "type": "unsafe_media_path",
-                        "message": (
-                            f"Embed media in msg {msg.id} failed the export-root "
-                            "containment check; skipped."
-                        ),
+                        "type": "embed_media_failed",
+                        "message": f"Embed media upload failed for msg {msg.id}: {exc}",
                     }
                 )
-                on_event(
-                    MigrationEvent(
-                        phase="messages",
-                        status="warning",
-                        message=f"Embed media in msg {msg.id} unsafe path; skipped.",
-                    )
-                )
-            # Upload embed media (thumbnail/image) if a local file is available.
-            if embed_media_path is not None:
-                try:
-                    media_id = await upload_with_cache(
-                        session,
-                        state.autumn_url,
-                        "attachments",
-                        embed_media_path,
-                        config.token,
-                        state.upload_cache,
-                        config.upload_delay,
-                        skip_cache=True,
-                    )
-                    flat["media"] = media_id
-                    state.autumn_uploads[media_id] = f"{msg.id}:embed"
-                    embed_media_ids.append(media_id)
-                    if channel_result is not None:
-                        channel_result.attachments_uploaded += 1
-                    else:
-                        state.attachments_uploaded += 1
-                except Exception as exc:  # noqa: BLE001
-                    acc_warnings.append(
-                        {
-                            "phase": "messages",
-                            "type": "embed_media_failed",
-                            "message": f"Embed media upload failed for msg {msg.id}: {exc}",
-                        }
-                    )
+                continue
+            flat["media"] = media_id
+            state.autumn_uploads[media_id] = f"{msg.id}:embed"
+            embed_media_ids.append(media_id)
+            if channel_result is not None:
+                channel_result.attachments_uploaded += 1
+            else:
+                state.attachments_uploaded += 1
+            break
+        if flat.get("description") or flat.get("title") or media_id is not None:
             stoat_embeds.append(flat)
 
     # Report embeds that could not be migrated (beyond cap or without title/description).
