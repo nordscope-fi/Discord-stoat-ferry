@@ -1756,6 +1756,21 @@ def _b5_console() -> tuple[object, object]:
     return buf, _Console(file=buf, force_terminal=False, no_color=True, width=140)
 
 
+def test_cli_renders_full_export_fallback_without_detail_leak() -> None:
+    from discord_ferry.cli import _ProgressTracker
+    from discord_ferry.core.events import MigrationEvent
+
+    buf, console = _b5_console()
+    with patch("discord_ferry.cli.console", console):
+        _ProgressTracker(verbose=False).on_event(
+            MigrationEvent(
+                "export", "notice", "Using full export because current coverage is incomplete"
+            )
+        )
+    assert "full export" in buf.getvalue().lower()
+    assert "discord-token" not in buf.getvalue()
+
+
 def test_progress_tracker_escapes_hostile_message() -> None:  # SC-1
     from discord_ferry.cli import _ProgressTracker
     from discord_ferry.core.events import MigrationEvent
