@@ -351,6 +351,81 @@ def test_source_formation_refuses_non_guild_thread_and_unknown_scopes(channel_ty
     assert {problem.reason for problem in problems} == {"unsupported"}
 
 
+def test_public_thread_uses_parent_when_inherited_send_matches_parent() -> None:
+    p = source_functions()
+    source = source_evidence((0,), ())
+    parent = replace(
+        source.channels[0],
+        id="223",
+        nsfw=False,
+        capture_fields=frozenset({"type", "permission_overwrites", "nsfw"}),
+    )
+    thread = p.SourceChannel(
+        "222",
+        11,
+        None,
+        0,
+        frozenset({"type", "parent_id", "thread_metadata.archived", "thread_metadata.locked"}),
+        parent_id="223",
+        thread_archived=False,
+        thread_locked=False,
+    )
+    source = replace(
+        source, channels=(parent, thread), covered_channel_ids=frozenset({"222", "223"})
+    )
+    parent_id, pairs, problems = p.resolve_public_thread_scope(
+        source,
+        "222",
+        (),
+    )
+    assert parent_id == "223"
+    assert dict(pairs)[10] == p.BitPredicate(0, 0, 0, False)
+    assert problems == ()
+    plan = p.compile_supported_bits(source, compiler_layout(source))
+    assert plan.problems == ()
+    assert any(channel.source_key == "222" for channel in plan.channels)
+
+
+@pytest.mark.parametrize(
+    ("thread_send", "parent_send", "accepted"),
+    [(0, 0, True), (1, 1, True), (0, 1, False), (1, 0, False)],
+)
+def test_public_thread_requires_equal_parent_and_inherited_send_predicates(
+    thread_send: int, parent_send: int, accepted: bool
+) -> None:
+    p = source_functions()
+    source = source_evidence((0,), ())
+    parent = replace(
+        source.channels[0],
+        id="223",
+        overwrites=(p.SourceOverwrite("111", (parent_send << 11) | (thread_send << 38), 0),),
+        nsfw=False,
+        capture_fields=frozenset({"type", "permission_overwrites", "nsfw"}),
+    )
+    thread = p.SourceChannel(
+        "222",
+        11,
+        None,
+        0,
+        frozenset({"type", "parent_id", "thread_metadata.archived", "thread_metadata.locked"}),
+        parent_id="223",
+        thread_archived=False,
+        thread_locked=False,
+    )
+    source = replace(
+        source, channels=(parent, thread), covered_channel_ids=frozenset({"222", "223"})
+    )
+
+    _, pairs, problems = p.resolve_public_thread_scope(
+        source,
+        "222",
+        (),
+    )
+
+    assert bool(pairs) is accepted
+    assert bool(problems) is not accepted
+
+
 def test_source_formation_refuses_member_specific_effects_without_member_facts() -> None:
     p = source_functions()
     source = source_evidence((0,), ())
