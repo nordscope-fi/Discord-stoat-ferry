@@ -1,5 +1,7 @@
+import asyncio
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -9,6 +11,7 @@ from discord_ferry.exporter.staging import (
     create_stage,
     discard_candidate,
     inspect_stage,
+    seed_stage_media,
     validate_coverage,
 )
 from discord_ferry.state import MigrationState
@@ -206,3 +209,94 @@ def test_stage_validation_refuses_link_below_output_root(tmp_path: Path) -> None
 
     with pytest.raises(ExportError, match="owned|Linked"):
         inspect_stage(stage, output_root, "full")
+
+
+def test_seed_rejects_different_byte_collision(tmp_path: Path) -> None:
+    cache = tmp_path / "dce_cache" / "1543572361285083187"
+    stage = create_stage(tmp_path, "run-1")
+    (cache / "media").mkdir(parents=True)
+    (stage / "media").mkdir()
+    (cache / "media" / "1543572361285083187-1.png").write_bytes(b"old")
+    (stage / "media" / "1543572361285083187-1.png").write_bytes(b"new")
+
+    assert seed_stage_media(cache, stage, eligible=True) is False
+
+
+def test_seed_copies_contained_regular_media_files(tmp_path: Path) -> None:
+    previous = create_stage(tmp_path, "previous")
+    stage = create_stage(tmp_path, "run-1")
+    (previous / "media" / "nested").mkdir(parents=True)
+    (previous / "media" / "nested" / "image.png").write_bytes(b"image")
+
+    assert seed_stage_media(previous, stage, eligible=True) is True
+    assert (stage / "media" / "nested" / "image.png").read_bytes() == b"image"
+
+
+def test_seed_copies_legacy_per_export_media_without_copying_json(tmp_path: Path) -> None:
+    previous = tmp_path / "dce_cache" / "1543572361285083187"
+    stage = create_stage(tmp_path, "run-1")
+    previous.mkdir(parents=True)
+    (previous / "legacy-general.json").write_bytes(b"json-input")
+    assets = previous / "legacy-general.json_Files"
+    assets.mkdir()
+    (assets / "generated-name.png").write_bytes(b"generated-media")
+
+    assert seed_stage_media(previous, stage, eligible=True) is True
+    assert (stage / "media" / "generated-name.png").read_bytes() == b"generated-media"
+    assert not (stage / "media" / "legacy-general.json").exists()
+
+
+def test_seed_without_reusable_media_disables_reuse(tmp_path: Path) -> None:
+    previous = tmp_path / "dce_cache" / "1543572361285083187"
+    previous.mkdir(parents=True)
+    (previous / "general.json").write_bytes(b"json-input")
+    stage = create_stage(tmp_path, "run-1")
+
+    assert seed_stage_media(previous, stage, eligible=True) is False
+    assert not (stage / "media").exists()
+
+
+def test_seed_preflights_different_bytes_from_legacy_directories(tmp_path: Path) -> None:
+    previous = tmp_path / "dce_cache" / "1543572361285083187"
+    stage = create_stage(tmp_path, "run-1")
+    first = previous / "general.json_Files"
+    second = previous / "thread.json_Files"
+    first.mkdir(parents=True)
+    second.mkdir()
+    (first / "generated-name.png").write_bytes(b"first")
+    (second / "generated-name.png").write_bytes(b"second")
+
+    assert seed_stage_media(previous, stage, eligible=True) is False
+    assert not (stage / "media").exists()
+
+
+def test_seed_refuses_linked_legacy_media_file(tmp_path: Path) -> None:
+    previous = tmp_path / "dce_cache" / "1543572361285083187"
+    stage = create_stage(tmp_path, "run-1")
+    assets = previous / "general.json_Files"
+    assets.mkdir(parents=True)
+    external = tmp_path / "external.png"
+    external.write_bytes(b"external")
+    (assets / "generated-name.png").symlink_to(external)
+
+    assert seed_stage_media(previous, stage, eligible=True) is False
+    assert not (stage / "media").exists()
+
+
+def test_seed_copy_error_disables_reuse_and_cancellation_propagates(tmp_path: Path) -> None:
+    previous = create_stage(tmp_path, "previous")
+    stage = create_stage(tmp_path, "run-1")
+    (previous / "media").mkdir()
+    (previous / "media" / "generated-name.png").write_bytes(b"media")
+
+    with patch("discord_ferry.exporter.staging.shutil.copyfile", side_effect=OSError("copy")):
+        assert seed_stage_media(previous, stage, eligible=True) is False
+
+    with (
+        patch(
+            "discord_ferry.exporter.staging.shutil.copyfile",
+            side_effect=asyncio.CancelledError,
+        ),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        seed_stage_media(previous, stage, eligible=True)
