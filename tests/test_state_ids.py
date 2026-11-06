@@ -68,6 +68,8 @@ _BAD = "not-an-id"
         ({"stoat_server_id": _BAD}, "stoat_server_id"),
         ({"role_map": {"111": _BAD}}, "role_map"),
         ({"channel_map": {"111": _BAD}}, "channel_map"),
+        ({"thread_parent_ids": {_BAD: "111"}}, "thread_parent_ids"),
+        ({"thread_parent_ids": {"111": _BAD}}, "thread_parent_ids"),
         ({"category_map": {"111": "has space"}}, "category_map"),
         ({"category_map": {"111": "x" * 33}}, "category_map"),
         ({"emoji_map": {"111": "../servers"}}, "emoji_map"),

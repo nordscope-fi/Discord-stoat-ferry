@@ -19,6 +19,14 @@ from discord_ferry.state import (
 from tests.stoat_ids import SERVER_ID, stoat_id
 
 
+def test_thread_parent_ids_round_trip_and_default_for_old_state(tmp_path: Path) -> None:
+    state = MigrationState(thread_parent_ids={"100000000000000011": "100000000000000010"})
+    save_state(state, tmp_path)
+    assert load_state(tmp_path).thread_parent_ids == state.thread_parent_ids
+    (tmp_path / "state.json").write_text('{"channel_map": {}}', encoding="utf-8")
+    assert load_state(tmp_path).thread_parent_ids == {}
+
+
 def test_delivery_receipt_roundtrip_is_structural(tmp_path: Path) -> None:
     from discord_ferry import state as state_module
 
@@ -1356,6 +1364,7 @@ _KNOWN_STATE_FIELDS = frozenset(
         "created_channel_names",
         "created_role_names",
         "created_emoji_names",
+        "thread_parent_ids",
         "thread_strategy",
         "channel_categories",
         "message_map",
