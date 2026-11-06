@@ -4,7 +4,13 @@ from pathlib import Path
 import pytest
 
 from discord_ferry.errors import ExportError
-from discord_ferry.exporter.staging import create_stage, inspect_stage, validate_coverage
+from discord_ferry.exporter.staging import (
+    accept_stage,
+    create_stage,
+    discard_candidate,
+    inspect_stage,
+    validate_coverage,
+)
 from discord_ferry.state import MigrationState
 
 
@@ -98,11 +104,62 @@ def test_stage_inspection_does_not_load_the_whole_json_document(
     assert inspect_stage(stage, tmp_path, "bounded").source_ids == ("1543572361285083187",)
 
 
+def test_bounded_discard_keeps_prior_accepted_path(tmp_path: Path) -> None:
+    accepted = create_stage(tmp_path, "accepted-a")
+    payload = json.loads((Path(__file__).parent / "fixtures" / "simple_channel.json").read_text())
+    payload["channel"]["id"] = "1543572361285083187"
+    (accepted / "source.json").write_text(json.dumps(payload), encoding="utf-8")
+    state = MigrationState(staged_input=inspect_stage(accepted, tmp_path, "full"))
+    candidate = create_stage(tmp_path, "candidate-b")
+
+    discard_candidate(candidate, tmp_path)
+
+    assert state.validated_stage_path(tmp_path).name == "accepted-a"
+    assert not candidate.exists()
+
+
+def test_accept_stage_persists_before_retaining_only_two_stages(tmp_path: Path) -> None:
+    stages = [create_stage(tmp_path, name) for name in ("old", "previous", "current")]
+    payload = json.loads((Path(__file__).parent / "fixtures" / "simple_channel.json").read_text())
+    payload["channel"]["id"] = "1543572361285083187"
+    for stage in stages:
+        (stage / "source.json").write_text(json.dumps(payload), encoding="utf-8")
+    state = MigrationState(staged_input=inspect_stage(stages[1], tmp_path, "full"))
+    saved: list[MigrationState] = []
+
+    def persist(snapshot: MigrationState) -> None:
+        assert stages[0].is_dir()
+        saved.append(snapshot)
+
+    accept_stage(state, tmp_path, inspect_stage(stages[2], tmp_path, "full"), persist)
+
+    assert saved == [state]
+    assert state.validated_stage_path(tmp_path).name == "current"
+    assert stages[1].is_dir()
+    assert not stages[0].exists()
+
+
+def test_retention_preserves_unowned_directory_below_stage_root(tmp_path: Path) -> None:
+    previous = create_stage(tmp_path, "previous")
+    current = create_stage(tmp_path, "current")
+    superseded = create_stage(tmp_path, "superseded")
+    unrelated = tmp_path / "staged-exports" / "user-folder"
+    unrelated.mkdir()
+    (unrelated / "keep.txt").write_text("user-owned", encoding="utf-8")
+    state = MigrationState(staged_input=inspect_stage(previous, tmp_path, "full"))
+
+    accept_stage(state, tmp_path, inspect_stage(current, tmp_path, "full"), lambda _state: None)
+
+    assert not superseded.exists()
+    assert (unrelated / "keep.txt").read_text(encoding="utf-8") == "user-owned"
+
+
 @pytest.mark.parametrize("marker_state", ["missing", "corrupt"])
 def test_stage_operations_refuse_missing_or_corrupt_owner_marker(
     tmp_path: Path, marker_state: str
 ) -> None:
     stage = create_stage(tmp_path, "candidate")
+    witness = inspect_stage(stage, tmp_path, "full")
     marker = stage / ".ferry-owned-stage"
     assert marker.is_file()
     if marker_state == "missing":
@@ -112,6 +169,10 @@ def test_stage_operations_refuse_missing_or_corrupt_owner_marker(
 
     with pytest.raises(ExportError, match="owned"):
         inspect_stage(stage, tmp_path, "full")
+    with pytest.raises(ExportError, match="owned"):
+        discard_candidate(stage, tmp_path)
+    with pytest.raises(ExportError, match="owned"):
+        accept_stage(MigrationState(), tmp_path, witness, lambda _state: None)
     assert stage.is_dir()
 
 
