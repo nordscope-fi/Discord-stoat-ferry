@@ -479,6 +479,42 @@ async def test_api_create_server_wrapped_response(mock_aiohttp: aioresponses) ->
     assert server_id == "srv123"
 
 
+async def test_api_create_server_reports_default_channel_ids(mock_aiohttp: aioresponses) -> None:
+    """#1203 SC-1.1. Only Stoat-shaped ids from object entries reach the caller's list."""
+    from tests.stoat_ids import stoat_id
+
+    general = stoat_id(1)
+    mock_aiohttp.post(
+        f"{BASE_URL}/servers/create",
+        payload={
+            "server": {"_id": "srv123", "name": "Test"},
+            "channels": [{"_id": general}, {"_id": "../servers/x"}, "junk", {"name": "x"}],
+        },
+    )
+    found: list[str] = []
+    async with aiohttp.ClientSession() as session:
+        server_id = await api_create_server(
+            session, BASE_URL, TOKEN, "Test", default_channels=found
+        )
+    assert server_id == "srv123"
+    assert found == [general]
+
+
+@pytest.mark.parametrize("extra", [{"channels": []}, {}, {"channels": "nope"}])
+async def test_api_create_server_without_default_channels(
+    mock_aiohttp: aioresponses, extra: dict[str, object]
+) -> None:
+    """#1203 SC-1.2. A missing, empty or odd channels member never fails the create."""
+    mock_aiohttp.post(f"{BASE_URL}/servers/create", payload={"server": {"_id": "srv123"}, **extra})
+    found: list[str] = []
+    async with aiohttp.ClientSession() as session:
+        server_id = await api_create_server(
+            session, BASE_URL, TOKEN, "Test", default_channels=found
+        )
+    assert server_id == "srv123"
+    assert found == []
+
+
 async def test_api_create_server_sends_nsfw_in_create_body(mock_aiohttp: aioresponses) -> None:
     """POST /servers/create carries the NSFW flag, which edits cannot apply (#1168)."""
     bodies: list[dict[str, object]] = []
