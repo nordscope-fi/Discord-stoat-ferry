@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.6.4] - 2026-11-10
+
+### Fixed
+
+- Recognise forum posts from real DiscordChatExporter exports, which arrive as ordinary threads, by reading their parent channel's type from Discord. They now get their forum category, forum index and "Forum post" header (#1217).
+
 ## [3.6.3] - 2026-11-10
 
 ### Fixed
