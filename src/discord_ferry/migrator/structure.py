@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import tempfile
 import uuid
 from pathlib import Path
@@ -41,6 +42,7 @@ from discord_ferry.migrator.api import (
     api_create_channel,
     api_create_role,
     api_create_server,
+    api_delete_channel,
     api_edit_channel,
     api_edit_role,
     api_edit_role_ranks,
@@ -212,6 +214,47 @@ def _server_permission_runtime(config: FerryConfig, state: MigrationState) -> Pe
     return runtime
 
 
+# The non-retryable form _api_request raises for a 4xx answer. 404 never reaches the
+# caller of api_delete_channel (it counts as success), so a match is a definite refusal.
+_DEFINITE_REFUSAL = re.compile(r"API error 4\d\d:")
+
+
+async def _remove_default_channels(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    runtime: PermissionRuntime,
+) -> None:
+    """Delete the channels Stoat created with the server (#1203).
+
+    Only ids this state saved from its own create response are here, so a channel a
+    person made, or one Ferry migrated, is never a candidate. A definite refusal warns
+    and keeps the id for the next run. An uncertain outcome stops the run.
+    """
+    for channel_id in list(state.default_channel_ids):
+        runtime.note_write()
+        try:
+            await api_delete_channel(session, config.stoat_url, config.token, channel_id)
+        except MigrationError as exc:
+            if not _DEFINITE_REFUSAL.match(str(exc)):
+                raise runtime.stop("write_uncertain", stage="application") from exc
+            runtime.note_write_rejected()
+            state.warnings.append(
+                {
+                    "phase": "server",
+                    "type": "default_channel_delete_failed",
+                    "message": (
+                        f"Could not delete Stoat's default channel {channel_id}; "
+                        "it will be retried on the next run."
+                    ),
+                }
+            )
+            continue
+        runtime.note_write_confirmed()
+        state.default_channel_ids.remove(channel_id)
+        save_state(state, config.output_dir)
+
+
 async def run_server(
     config: FerryConfig,
     state: MigrationState,
@@ -278,14 +321,19 @@ async def run_server(
                 name = "Ferry Server"
 
             runtime.note_write()
+            defaults: list[str] = []
             state.stoat_server_id = await api_create_server(
                 session,
                 config.stoat_url,
                 config.token,
                 truncate_name(name),
                 nsfw=discord_meta.guild_nsfw if discord_meta else None,
+                default_channels=defaults,
             )
             runtime.note_write_confirmed()
+            # Saved with the server id by the save below, before any delete, so an
+            # interrupted run leaves them recorded for the next one (#1203).
+            state.default_channel_ids = defaults
             # S2: persist immediately so a kill before the post-phase save still records the
             # server id — on --resume the reuse branch fires instead of creating a duplicate.
             save_state(state, config.output_dir)
@@ -298,6 +346,7 @@ async def run_server(
                     message=f"Created server '{name}' ({state.stoat_server_id})",
                 )
             )
+            await _remove_default_channels(session, config, state, runtime)
 
         # Upload and apply guild icon if available.
         if exports:
