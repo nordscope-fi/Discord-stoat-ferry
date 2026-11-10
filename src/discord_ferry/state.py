@@ -258,6 +258,10 @@ class MigrationState:
     # Native-fidelity attribute application counts (slowmode, user_limit, ...)
     native_fidelity_counts: dict[str, int] = field(default_factory=dict)
 
+    # Ids of the channels Stoat created with the server (its automatic "General"),
+    # saved before Ferry deletes them and cleared once each is gone (#1203).
+    default_channel_ids: list[str] = field(default_factory=list)
+
     # Stoat server ID and Autumn URL (discovered during CONNECT phase)
     stoat_server_id: str = ""
     autumn_url: str = ""
@@ -974,6 +978,12 @@ def check_state_ids(state: MigrationState) -> None:
     _check_map(p, "emoji_map", state.emoji_map, "Stoat emoji id", _STOAT_FILE_ID)
     _check_map(p, "message_map", state.message_map, "Stoat message id", _STOAT_ULID)
 
+    if isinstance(state.default_channel_ids, list):
+        for i, channel_id in enumerate(state.default_channel_ids):
+            p.stoat(f"default_channel_ids[{i}]", channel_id, "Stoat channel id", _STOAT_ULID)
+    else:
+        p.add("default_channel_ids", "expected a list of Stoat channel ids")
+
     if isinstance(state.forum_index_message_ids, dict):
         for key, value in state.forum_index_message_ids.items():
             p.stoat(
@@ -1096,6 +1106,7 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "source_messages_total": state.source_messages_total,
         "forum_channel_members": state.forum_channel_members,
         "forum_category_names": state.forum_category_names,
+        "default_channel_ids": state.default_channel_ids,
         "channel_message_counts": state.channel_message_counts,
         "reaction_message_counts": state.reaction_message_counts,
         "forum_index_message_ids": state.forum_index_message_ids,
@@ -1186,6 +1197,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             source_messages_total=data.get("source_messages_total", 0),
             forum_channel_members=data.get("forum_channel_members", {}),
             forum_category_names=data.get("forum_category_names", {}),
+            default_channel_ids=data.get("default_channel_ids", []),
             channel_message_counts=data.get("channel_message_counts", {}),
             reaction_message_counts=data.get("reaction_message_counts", {}),
             forum_index_message_ids=data.get("forum_index_message_ids", {}),
