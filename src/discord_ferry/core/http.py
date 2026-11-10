@@ -111,6 +111,11 @@ def _build_ssl_context() -> ssl.SSLContext:
     else:
         context = ssl.create_default_context()
 
+    # Python 3.13 added VERIFY_X509_STRICT to create_default_context(). It rejects
+    # corporate roots that lack key identifiers even when the user trusts them,
+    # which 3.11 and 3.12 (and the frozen apps) accept. Clear only that rule (#1202).
+    context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+
     bundle_loaded = _load_certifi_roots(context)
     if _native_context_active:
         _trust_source = "native-union" if bundle_loaded else "native"
