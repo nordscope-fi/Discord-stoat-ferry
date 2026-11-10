@@ -875,6 +875,24 @@ def test_completed_channel_ids_roundtrip(tmp_path: Path) -> None:
     assert loaded.completed_channel_ids == {"ch_a", "ch_b", "ch_c"}
 
 
+def test_default_channel_ids_round_trip(tmp_path: Path) -> None:
+    """#1203 SC-2.5. The pending default-channel deletion survives a save and load."""
+    save_state(MigrationState(default_channel_ids=[stoat_id(1)]), tmp_path)
+    assert load_state(tmp_path).default_channel_ids == [stoat_id(1)]
+
+
+@pytest.mark.parametrize("value", [["../servers/x"], [7], stoat_id(1)])
+def test_default_channel_ids_malformed_refused(tmp_path: Path, value: object) -> None:
+    """#1203 SC-2.5. A malformed saved id never reaches a DELETE URL."""
+    save_state(MigrationState(), tmp_path)
+    path = tmp_path / "state.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["default_channel_ids"] = value
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(StateError, match="default_channel_ids"):
+        load_state(tmp_path)
+
+
 def test_native_fidelity_counts_round_trip() -> None:
     """native_fidelity_counts dict survives _state_to_dict -> _dict_to_state."""
     from discord_ferry.state import _dict_to_state, _state_to_dict
@@ -1551,6 +1569,7 @@ _KNOWN_STATE_FIELDS = frozenset(
         "invite_code",
         "invite_url",
         "native_fidelity_counts",
+        "default_channel_ids",
     }
 )
 
