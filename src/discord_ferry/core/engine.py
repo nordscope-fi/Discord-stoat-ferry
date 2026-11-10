@@ -694,6 +694,7 @@ async def run_migration(
             state.category_names = dict(prior.category_names)
             state.channel_categories = dict(prior.channel_categories)
             state.native_fidelity_counts = dict(prior.native_fidelity_counts)
+            state.default_channel_ids = list(prior.default_channel_ids)
             # Carry-over audit (every MigrationState field classified):
             #   CARRY: role_map / channel_map / category_map / emoji_map,
             #     pending_emoji_rewrites (repair resume record, carried beside
@@ -714,7 +715,9 @@ async def run_migration(
             #     forum_index_present_unknown_id (the #215 duplicate marker, carried
             #     beside forum_index_message_ids so a resumed run keeps skipping an
             #     index whose id was lost rather than re-posting it),
-            #     native_fidelity_counts (cumulative fidelity counter), and the
+            #     native_fidelity_counts (cumulative fidelity counter),
+            #     default_channel_ids (a pending deletion of Stoat's automatic
+            #     channel must survive into the next run, #1203), and the
             #     cumulative counters (attachments_uploaded/skipped,
             #     reactions_applied, pins_applied). prior_messages_total is DERIVED
             #     here from len(prior.message_map).

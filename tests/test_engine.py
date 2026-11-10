@@ -6365,6 +6365,22 @@ async def test_an_incremental_with_a_prior_records_the_thread_strategy(tmp_path:
 
 
 @pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_an_incremental_carries_default_channel_ids(tmp_path: Path) -> None:
+    """#1203 SC-2.6. A pending default-channel deletion survives into the next run."""
+    from discord_ferry.state import save_state
+
+    prior = MigrationState(
+        channel_map={"100": valid_stoat_id(2)},
+        default_channel_ids=[valid_stoat_id(1)],
+    )
+    save_state(prior, tmp_path)
+
+    config = _make_config(tmp_path, incremental=True)
+    state = await run_migration(config, lambda _e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert state.default_channel_ids == [valid_stoat_id(1)]
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_an_incremental_with_no_prior_records_the_thread_strategy(tmp_path: Path) -> None:
     """SC-1.6. The fallback branch, which constructs fresh and warns."""
     config = _make_config(tmp_path, incremental=True, thread_strategy="archive")
