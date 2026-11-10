@@ -55,6 +55,8 @@ on the server default, because that default applies to every member.
 
 When an existing-server migration sends mapped role mentions, grant `MentionRoles` to Ferry's assigned role in the receiving channels. Do not grant it through the server default.
 
+When the export contains `@everyone` or `@online`, grant `MentionEveryone` to Ferry's assigned role in the receiving channels. Stoat refuses any message with either word from an account that lacks it. Do not grant it through the server default.
+
 **Why:** Without Masquerade, messages cannot display the original Discord author's name and avatar. Without ManageRole, masquerade colours will not work. See the full permission table in [Self-Hosted Tips](self-hosted-tips.md#permissions).
 
 !!! tip "Use the server owner's account"
