@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.6.2] - 2026-11-10
+
+### Fixed
+
+- Record Stoat's `MentionEveryone` refusal as a confirmed rejection, so a rerun after granting the permission resends each refused `@everyone` or `@online` message once, and document the permission on the three non-owner setup pages (#1184).
+
 ## [3.6.1] - 2026-11-06
 
 ### Changed
