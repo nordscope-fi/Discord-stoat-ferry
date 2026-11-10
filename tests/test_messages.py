@@ -3788,6 +3788,24 @@ async def test_new_forum_posts_forum_header(tmp_path: Path) -> None:
         assert headers == ["[Forum post migrated from #general]"], f"type={forum_type}"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
+async def test_real_shape_forum_post_header_follows_saved_routing(tmp_path: Path) -> None:
+    """#1217 SC-1.10: a type 11 post routed to a forum category gets the Forum-post header."""
+    for members, expected in (
+        ({"forum-general": ["ch1"]}, "[Forum post migrated from #general]"),
+        ({}, "[Thread migrated from #general]"),
+    ):
+        sent: list[dict[str, Any]] = []
+        state = _make_state(
+            channel_high_water={}, channel_message_offsets={}, forum_channel_members=members
+        )
+        config = _make_config(tmp_path, incremental=True)
+        export = _make_thread_export(messages=[_make_message(id="100")], channel_type=11)
+        with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+            await run_messages(config, state, [export], lambda e: None)
+        assert sent[0].get("content") == expected, f"members={members}"
+
+
 # ---------------------------------------------------------------------------
 # #77 — non-numeric carried offset crash guard (S3)
 # ---------------------------------------------------------------------------

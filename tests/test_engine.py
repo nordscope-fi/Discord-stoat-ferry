@@ -1542,6 +1542,33 @@ async def test_permission_preflight_binds_a_real_shape_forum_index(tmp_path):
     assert index.source_ids == frozenset({"222", "333"})
 
 
+async def test_resend_channel_forum_header_follows_saved_routing(tmp_path, monkeypatch):
+    """#1217 SC-1.11: the repair resend header matches the saved forum routing."""
+    contents: list[str] = []
+
+    async def capture(**kwargs):
+        contents.append(kwargs["content"])
+        raise RuntimeError("stop after header")
+
+    monkeypatch.setattr(engine_module, "deliver_part", capture)
+    monkeypatch.setattr(engine_module, "ensure_delivery_namespace", lambda *_a: None)
+    monkeypatch.setattr(engine_module, "begin_delivery_replacement", lambda _s, _o, ref: ref)
+    export = DCEExport(
+        DCEGuild("111", "source"),
+        DCEChannel("ch1", 11, "post", category_id="300"),
+        is_thread=True,
+        parent_channel_name="feedback-forum",
+    )
+    state = MigrationState(
+        channel_map={"ch1": "t1"}, forum_channel_members={"forum-feedback-forum": ["ch1"]}
+    )
+    with pytest.raises(RuntimeError, match="stop after header"):
+        await engine_module._resend_channel(
+            AsyncMock(), _make_config(tmp_path), state, export, lambda _e: None
+        )
+    assert contents == ["[Forum post migrated from #feedback-forum]"]
+
+
 def test_permission_index_sources_bind_a_carried_real_shape_forum():
     """#1217 SC-1.5: a carried real-shape forum keeps its index binding."""
     exports = [
