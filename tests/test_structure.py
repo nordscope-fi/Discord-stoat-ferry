@@ -30,7 +30,7 @@ from discord_ferry.discord.metadata import (
     save_discord_metadata,
 )
 from discord_ferry.discord.permissions import ALL_STOAT_PERMISSIONS
-from discord_ferry.errors import AutumnUploadError, MigrationError
+from discord_ferry.errors import AutumnUploadError, MigrationError, PermissionSafetyError
 from discord_ferry.migrator import structure as structure_module
 from discord_ferry.migrator.structure import (
     FERRY_MIN_PERMISSIONS,
@@ -57,6 +57,7 @@ from discord_ferry.parser.models import (
 from discord_ferry.state import DeliveryRef, MigrationState, load_state, read_delivery_receipt
 from discord_ferry.state import save_state as save_state_real
 from tests.local_cdn import ENDLESS_LIMIT, RewritingSession, local_cdn
+from tests.stoat_ids import stoat_id
 from tests.test_delivery import (
     publication_permission_collaborator as publication_permission_collaborator,
 )
@@ -1581,6 +1582,107 @@ async def test_run_server_uses_existing_server(tmp_path: Path) -> None:
     assert state.stoat_server_id == "existing-srv"
     messages = _collect_events(events)
     assert any("existing-srv" in msg for msg in messages)
+    assert _deletes(m) == []
+
+
+_SRV = stoat_id(5)
+_GENERAL = stoat_id(1)
+
+
+def _create_with_general(m: aioresponses) -> None:
+    m.post(
+        f"{STOAT_URL}/servers/create",
+        payload={"server": {"_id": _SRV, "name": "Test"}, "channels": [{"_id": _GENERAL}]},
+    )
+    m.patch(f"{STOAT_URL}/servers/{_SRV}", payload={}, repeat=True)
+
+
+def _deletes(m: aioresponses) -> list[str]:
+    return [str(url) for (method, url) in m.requests if method == "DELETE"]
+
+
+async def test_run_server_deletes_the_default_channel(
+    tmp_path: Path, structure_binding_collaborator: MagicMock
+) -> None:
+    """#1203 SC-1.3, SC-1.6, SC-2.1. Saved first, deleted once, then cleared."""
+    seen_on_disk: list[list[str]] = []
+
+    def on_delete(url: object, **kwargs: object) -> CallbackResult:
+        raw = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+        seen_on_disk.append(raw["default_channel_ids"])
+        return CallbackResult(status=204)
+
+    state = MigrationState()
+    with aioresponses() as m:
+        _create_with_general(m)
+        m.delete(f"{STOAT_URL}/channels/{_GENERAL}", callback=on_delete)
+        await run_server(_make_config(tmp_path), state, [_make_export()], lambda e: None)
+
+    assert _deletes(m) == [f"{STOAT_URL}/channels/{_GENERAL}"]
+    assert seen_on_disk == [[_GENERAL]]
+    assert state.default_channel_ids == []
+    assert load_state(tmp_path).default_channel_ids == []
+    structure_binding_collaborator.note_write_confirmed.assert_called()
+
+
+async def test_run_server_refused_default_delete_warns(
+    tmp_path: Path, structure_binding_collaborator: MagicMock
+) -> None:
+    """#1203 SC-4.1. A 403 is a definite refusal: warn, keep the id, continue."""
+    state = MigrationState()
+    with aioresponses() as m:
+        _create_with_general(m)
+        m.delete(
+            f"{STOAT_URL}/channels/{_GENERAL}", status=403, payload={"type": "MissingPermission"}
+        )
+        await run_server(_make_config(tmp_path), state, [_make_export()], lambda e: None)
+
+    assert state.default_channel_ids == [_GENERAL]
+    kinds = [w for w in state.warnings if w["type"] == "default_channel_delete_failed"]
+    assert len(kinds) == 1
+    assert _GENERAL in kinds[0]["message"]
+    assert "MissingPermission" not in kinds[0]["message"]
+    structure_binding_collaborator.note_write_rejected.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", ["status", "network"])
+async def test_run_server_uncertain_default_delete_stops(
+    tmp_path: Path,
+    structure_binding_collaborator: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """#1203 SC-4.2. A 500 or a dropped connection is uncertain: stop, keep the id."""
+    monkeypatch.setattr("discord_ferry.migrator.api.asyncio.sleep", AsyncMock())
+    structure_binding_collaborator.stop.return_value = PermissionSafetyError(
+        MagicMock(reason="write_uncertain", stage="application", effects="changes_possible")
+    )
+    state = MigrationState()
+    with aioresponses() as m:
+        _create_with_general(m)
+        url = f"{STOAT_URL}/channels/{_GENERAL}"
+        if failure == "status":
+            m.delete(url, status=500, repeat=True)
+        else:
+            m.delete(url, exception=aiohttp.ClientConnectionError(), repeat=True)
+        with pytest.raises(PermissionSafetyError):
+            await run_server(_make_config(tmp_path), state, [_make_export()], lambda e: None)
+
+    structure_binding_collaborator.stop.assert_called_once_with(
+        "write_uncertain", stage="application"
+    )
+    assert load_state(tmp_path).default_channel_ids == [_GENERAL]
+
+
+async def test_run_server_dry_run_deletes_nothing(tmp_path: Path) -> None:
+    """#1203 SC-1.5. A dry run returns before the permission runtime, so no binding fixture."""
+    state = MigrationState()
+    with aioresponses() as m:
+        await run_server(
+            _make_config(tmp_path, dry_run=True), state, [_make_export()], lambda e: None
+        )
+    assert m.requests == {}
+    assert state.default_channel_ids == []
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
