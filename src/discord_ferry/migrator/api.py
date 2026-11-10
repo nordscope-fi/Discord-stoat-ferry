@@ -513,7 +513,8 @@ async def _api_request_inner(
                             isinstance(rejection, dict)
                             and rejection.get("type") == "MissingPermission"
                             and isinstance(rejection.get("permission"), str)
-                            and rejection["permission"] in {"SendMessage", "MentionRoles"}
+                            and rejection["permission"]
+                            in {"SendMessage", "MentionRoles", "MentionEveryone"}
                             and set(rejection) <= {"type", "permission", "location"}
                             and (
                                 "location" not in rejection
