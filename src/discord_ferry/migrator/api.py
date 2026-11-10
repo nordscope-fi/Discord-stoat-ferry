@@ -694,6 +694,7 @@ async def api_create_server(
     name: str,
     *,
     nsfw: bool | None = None,
+    default_channels: list[str] | None = None,
 ) -> str:
     """Create a new server on the Stoat instance and return its id.
 
@@ -704,8 +705,10 @@ async def api_create_server(
         {"server": {"_id": ..., ...}, "channels": [...]}
 
     There is no ``serde(flatten)``, so reading ``_id`` off the top level raised
-    ``KeyError`` and killed the server phase (#265). The ``channels`` member is
-    discarded: Ferry creates its own channels and does not adopt the default one.
+    ``KeyError`` and killed the server phase (#265). When ``default_channels`` is
+    given, the id of each channel in the ``channels`` member that is shaped like a
+    Stoat id is appended to it, so the caller can delete Stoat's automatic "General"
+    channel (#1203). The member is informational: nothing in it fails the create.
 
     Args:
         session: An active aiohttp ClientSession.
@@ -754,6 +757,12 @@ async def api_create_server(
             f"Stoat returned no server id from {redact_url(url)}; 'server' keys were "
             f"{sorted(server)}. {version_hint}"
         )
+    if default_channels is not None:
+        listed: object = raw.get("channels")
+        if isinstance(listed, list):
+            for entry in listed:
+                if isinstance(entry, dict) and is_stoat_id(entry.get("_id")):
+                    default_channels.append(entry["_id"])
     return server_id
 
 
