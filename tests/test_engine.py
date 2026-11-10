@@ -10551,6 +10551,63 @@ async def test_run_build_truncates_server_role_and_channel_names() -> None:
     assert create_channel.await_args.kwargs["name"] == long_channel[:32]
 
 
+def _create_server_reporting(general: str) -> AsyncMock:
+    async def create(*args: object, default_channels: list[str] | None = None, **kw: object) -> str:
+        if default_channels is not None:
+            default_channels.append(general)
+        return "srv"
+
+    return AsyncMock(side_effect=create)
+
+
+async def test_run_build_deletes_the_default_channel_and_keeps_general() -> None:
+    """#1203 SC-3.1. Only the reported id is deleted; the layout's "general" is built."""
+    from discord_ferry.blueprint import BlueprintChannel, ServerBlueprint
+    from discord_ferry.core.engine import run_build
+
+    bp = ServerBlueprint(name="S", uncategorized_channels=[BlueprintChannel(name="general")])
+    create_channel = AsyncMock(return_value={"_id": "made"})
+    delete_channel = AsyncMock(return_value=None)
+    with (
+        patch(
+            "discord_ferry.core.engine.api_create_server",
+            _create_server_reporting(valid_stoat_id(1)),
+        ),
+        patch("discord_ferry.core.engine.api_create_channel", create_channel),
+        patch("discord_ferry.core.engine.api_delete_channel", delete_channel),
+        patch("discord_ferry.core.engine.new_session", lambda: AsyncMock()),
+    ):
+        await run_build("http://x", "t", bp, lambda event: None)
+
+    assert [c.args[3] for c in delete_channel.await_args_list] == [valid_stoat_id(1)]
+    assert create_channel.await_args.kwargs["name"] == "general"
+
+
+async def test_run_build_failed_default_delete_only_warns() -> None:
+    """#1203 SC-3.2. The build has no state file, so a failure is one warning."""
+    from discord_ferry.blueprint import ServerBlueprint
+    from discord_ferry.core.engine import run_build
+
+    events: list[MigrationEvent] = []
+    with (
+        patch(
+            "discord_ferry.core.engine.api_create_server",
+            _create_server_reporting(valid_stoat_id(1)),
+        ),
+        patch(
+            "discord_ferry.core.engine.api_delete_channel",
+            AsyncMock(side_effect=MigrationError("API error 403: MissingPermission")),
+        ),
+        patch("discord_ferry.core.engine.new_session", lambda: AsyncMock()),
+    ):
+        assert await run_build("http://x", "t", ServerBlueprint(name="S"), events.append) == "srv"
+
+    warnings = [e for e in events if e.status == "warning"]
+    assert len(warnings) == 1
+    assert valid_stoat_id(1) in warnings[0].message
+    assert "MissingPermission" not in warnings[0].message
+
+
 async def test_run_build_role_ordering_failure_is_a_warning_not_a_raise() -> None:
     """A role-ordering MigrationError surfaces as a warning event; the build still returns."""
     from discord_ferry.blueprint import BlueprintRole, ServerBlueprint
