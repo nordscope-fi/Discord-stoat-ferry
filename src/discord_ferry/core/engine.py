@@ -3282,9 +3282,10 @@ async def _resend_channel(
     ensure_delivery_namespace(state, config.output_dir, config.stoat_url)
     header_delivery: DeliveryResult | None = None
     if export.is_thread and export.parent_channel_name:
+        forum_members = {sid for ids in state.forum_channel_members.values() for sid in ids}
         header = (
             f"[Forum post migrated from #{export.parent_channel_name}]"
-            if export.channel.type in (15, 16)
+            if export.channel.type in (15, 16) or export.channel.id in forum_members
             else f"[Thread migrated from #{export.parent_channel_name}]"
         )
         header_delivery = await deliver_part(

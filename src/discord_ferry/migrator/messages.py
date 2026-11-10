@@ -1368,7 +1368,8 @@ async def _process_single_channel(
             and export.parent_channel_name
             and export.channel.id not in state.channel_high_water
         ):
-            if export.channel.type in (15, 16):
+            forum_members = {sid for ids in state.forum_channel_members.values() for sid in ids}
+            if export.channel.type in (15, 16) or export.channel.id in forum_members:
                 header = f"[Forum post migrated from #{export.parent_channel_name}]"
             else:
                 header = f"[Thread migrated from #{export.parent_channel_name}]"
