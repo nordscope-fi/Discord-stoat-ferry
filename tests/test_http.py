@@ -242,6 +242,61 @@ def test_verification_stays_strict(standard_http_platform: None) -> None:
     assert ctx.check_hostname is True
 
 
+def test_trusted_root_without_key_identifiers_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, standard_http_platform: None
+) -> None:
+    """#1202 SC-1.1. Python 3.13 made create_default_context() set
+    VERIFY_X509_STRICT, which rejects corporate roots without key identifiers
+    even when the user trusts them. Ferry clears only that flag."""
+    with _local_tls_server(tmp_path, key_identifiers=False) as (port, ca_file):
+        monkeypatch.setenv("SSL_CERT_FILE", str(ca_file))
+        http.reset_http_state()
+        _connect(http._get_ssl_context(), port, "localhost")
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 13), reason="strict X.509 is the default from Python 3.13"
+)
+def test_strict_default_context_rejects_the_same_chain(tmp_path: Path) -> None:
+    """#1202 SC-1.2, the repeatable control. If the fixture ever kept its key
+    identifiers, the acceptance test above would pass on unchanged code; this
+    proves on every 3.13+ run that the chain really trips the strict rule."""
+    with _local_tls_server(tmp_path, key_identifiers=False) as (port, ca_file):
+        control = ssl.create_default_context(cafile=str(ca_file))
+        with pytest.raises(ssl.SSLCertVerificationError) as caught:
+            _connect(control, port, "localhost")
+    assert "key identifier" in str(caught.value.verify_message).lower()
+
+
+def test_context_drops_only_the_strict_x509_flag(standard_http_platform: None) -> None:
+    """#1202 SC-1.4, SC-2.1, SC-2.2."""
+    http.reset_http_state()
+    ctx = http._build_ssl_context()
+    fresh = ssl.create_default_context()
+    assert not ctx.verify_flags & ssl.VERIFY_X509_STRICT
+    assert (ctx.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN) == (
+        fresh.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN
+    )
+    assert ctx.minimum_version == fresh.minimum_version
+    assert ctx.verify_mode is ssl.CERT_REQUIRED
+    assert ctx.check_hostname is True
+
+
+def test_legacy_root_change_keeps_root_and_hostname_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, standard_http_platform: None
+) -> None:
+    """#1202 SC-2.3, SC-2.4."""
+    with _local_tls_server(tmp_path, key_identifiers=False) as (port, ca_file):
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        http.reset_http_state()
+        with pytest.raises(ssl.SSLCertVerificationError):
+            _connect(http._get_ssl_context(), port, "localhost")
+        monkeypatch.setenv("SSL_CERT_FILE", str(ca_file))
+        http.reset_http_state()
+        with pytest.raises(ssl.SSLCertVerificationError):
+            _connect(http._get_ssl_context(), port, "wrong.invalid")
+
+
 def test_context_is_cached(standard_http_platform: None) -> None:
     """SC-134-9."""
     http.reset_http_state()
@@ -282,7 +337,11 @@ def test_fallback_keeps_verification_strict(
 
 def test_darwin_context_uses_scoped_native_trust(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(http, "sys", types.SimpleNamespace(platform="darwin"), raising=False)
-    native = Mock(verify_mode=ssl.CERT_REQUIRED, check_hostname=True)
+    native = Mock(
+        verify_mode=ssl.CERT_REQUIRED,
+        check_hostname=True,
+        verify_flags=ssl.VERIFY_X509_STRICT | ssl.VERIFY_X509_TRUSTED_FIRST,
+    )
     fake_truststore = types.SimpleNamespace(
         SSLContext=Mock(return_value=native),
         inject_into_ssl=Mock(side_effect=AssertionError("global injection is forbidden")),
@@ -293,6 +352,10 @@ def test_darwin_context_uses_scoped_native_trust(monkeypatch: pytest.MonkeyPatch
     http.reset_http_state()
 
     assert http._get_ssl_context() is native
+    assert not native.verify_flags & ssl.VERIFY_X509_STRICT
+    assert native.verify_flags & ssl.VERIFY_X509_TRUSTED_FIRST
+    assert native.verify_mode is ssl.CERT_REQUIRED
+    assert native.check_hostname is True
     assert ssl.SSLContext is before
     fake_truststore.SSLContext.assert_called_once_with(ssl.PROTOCOL_TLS_CLIENT)
     native.load_default_certs.assert_called_once_with()
@@ -312,6 +375,12 @@ def test_native_import_error_keeps_strict_standard_fallback(
 
     assert context.verify_mode is ssl.CERT_REQUIRED
     assert context.check_hostname is True
+    assert not context.verify_flags & ssl.VERIFY_X509_STRICT
+    fresh = ssl.create_default_context()
+    assert (context.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN) == (
+        fresh.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN
+    )
+    assert context.minimum_version == fresh.minimum_version
     assert http.describe_trust()["trust-source"] == "native-unavailable-union"
 
 
