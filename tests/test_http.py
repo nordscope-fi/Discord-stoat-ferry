@@ -44,11 +44,16 @@ _SRC = Path(__file__).resolve().parent.parent / "src" / "discord_ferry"
 
 
 @contextmanager
-def _local_tls_server(tmp_path: Path) -> Iterator[tuple[int, Path]]:
+def _local_tls_server(
+    tmp_path: Path, *, key_identifiers: bool = True
+) -> Iterator[tuple[int, Path]]:
+    """Serve one TLS chain on loopback. key_identifiers=False omits the CA's
+    Subject and Authority Key Identifiers and the leaf's Authority Key
+    Identifier, keeping every other field RFC 5280 compliant (#1202)."""
     now = datetime.now(UTC)
     ca_key = rsa.generate_private_key(public_exponent=65_537, key_size=2_048)
     ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Ferry test CA")])
-    ca_cert = (
+    ca_builder = (
         x509.CertificateBuilder()
         .subject_name(ca_name)
         .issuer_name(ca_name)
@@ -57,30 +62,29 @@ def _local_tls_server(tmp_path: Path) -> Iterator[tuple[int, Path]]:
         .not_valid_before(now - timedelta(minutes=1))
         .not_valid_after(now + timedelta(minutes=1))
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .add_extension(
+    )
+    if key_identifiers:
+        ca_builder = ca_builder.add_extension(
             x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False
-        )
-        .add_extension(
+        ).add_extension(
             x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False
         )
-        .add_extension(
-            x509.KeyUsage(
-                digital_signature=True,
-                content_commitment=False,
-                key_encipherment=False,
-                data_encipherment=False,
-                key_agreement=False,
-                key_cert_sign=True,
-                crl_sign=True,
-                encipher_only=None,
-                decipher_only=None,
-            ),
-            critical=True,
-        )
-        .sign(ca_key, hashes.SHA256())
-    )
+    ca_cert = ca_builder.add_extension(
+        x509.KeyUsage(
+            digital_signature=True,
+            content_commitment=False,
+            key_encipherment=False,
+            data_encipherment=False,
+            key_agreement=False,
+            key_cert_sign=True,
+            crl_sign=True,
+            encipher_only=None,
+            decipher_only=None,
+        ),
+        critical=True,
+    ).sign(ca_key, hashes.SHA256())
     leaf_key = rsa.generate_private_key(public_exponent=65_537, key_size=2_048)
-    leaf_cert = (
+    leaf_builder = (
         x509.CertificateBuilder()
         .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")]))
         .issuer_name(ca_name)
@@ -90,10 +94,15 @@ def _local_tls_server(tmp_path: Path) -> Iterator[tuple[int, Path]]:
         .not_valid_after(now + timedelta(minutes=1))
         .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .add_extension(
+    )
+    if key_identifiers:
+        leaf_builder = leaf_builder.add_extension(
             x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False
         )
-        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+    leaf_cert = (
+        leaf_builder.add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False
+        )
         .add_extension(
             x509.KeyUsage(
                 digital_signature=True,
