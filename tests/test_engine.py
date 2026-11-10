@@ -938,6 +938,100 @@ def _permission_preflight_case(
     return _make_config(tmp_path, export_dir=tmp_path), exports, meta
 
 
+def _real_forum_case(tmp_path, *, split_parents=False):
+    """#1217: DCE 2.48 forum posts are type 11 threads under a type 15 parent."""
+    from discord_ferry.discord import client
+    from discord_ferry.discord.metadata import (
+        ChannelMeta,
+        DiscordMetadata,
+        PermissionPair,
+        RoleMeta,
+        RoleOverride,
+        capture_permission_source,
+        save_discord_metadata,
+    )
+    from discord_ferry.discord.permissions import translate_permissions
+
+    # View, send, and send-in-threads: a thread's send access must equal its parent's.
+    view_send = (1 << 10) | (1 << 11) | (1 << 38)
+    everyone = view_send
+    raw_roles = [
+        client._parse_role(
+            {
+                "id": "111",
+                "name": "everyone",
+                "permissions": str(everyone),
+                "position": 0,
+                "managed": False,
+            }
+        ),
+        client._parse_role(
+            {
+                "id": "112",
+                "name": "ordinary",
+                "permissions": str(view_send),
+                "position": 1,
+                "managed": False,
+            }
+        ),
+    ]
+    parents = {"222": "300", "333": "301" if split_parents else "300"}
+    channels = []
+    translated = {}
+    for pid in sorted(set(parents.values())):
+        deny = (1 << 10) if pid == "301" else 0
+        channels.append(
+            client._parse_channel(
+                {
+                    "id": pid,
+                    "name": "Ideas & help",
+                    "type": 15,
+                    "guild_id": "111",
+                    "nsfw": False,
+                    "permission_overwrites": [
+                        {"id": "112", "type": 0, "allow": "0", "deny": str(deny)}
+                    ],
+                }
+            )
+        )
+        translated[pid] = ChannelMeta(
+            False, role_overrides=[RoleOverride("112", 0, translate_permissions(deny))]
+        )
+    for cid, pid in parents.items():
+        channels.append(
+            client._parse_channel(
+                {
+                    "id": cid,
+                    "name": "post",
+                    "type": 11,
+                    "guild_id": "111",
+                    "parent_id": pid,
+                    "thread_metadata": {"archived": False, "locked": False},
+                }
+            )
+        )
+    meta = DiscordMetadata(
+        "111",
+        "2026-10-20T08:00:00+00:00",
+        translate_permissions(everyone),
+        {"112": PermissionPair(translate_permissions(view_send), 0)},
+        translated,
+        role_metadata={"112": RoleMeta(position=1, name="ordinary")},
+        permission_source=capture_permission_source("111", raw_roles, channels),
+    )
+    save_discord_metadata(meta, tmp_path)
+    exports = [
+        DCEExport(
+            DCEGuild("111", "source"),
+            DCEChannel(cid, 11, "post", category_id=pid, category="Ideas & help"),
+            is_thread=True,
+            parent_channel_name="Ideas & help",
+        )
+        for cid, pid in parents.items()
+    ]
+    return _make_config(tmp_path, export_dir=tmp_path), exports
+
+
 def _permission_preflight_operation():
     operation = getattr(engine_module, "_prepare_permission_operation", None)
     assert callable(operation), "The engine needs whole-operation permission preflight"
@@ -1431,6 +1525,61 @@ async def test_permission_preflight_binds_all_generated_index_sources_or_stops(t
                     assert index.source_key == "forum-index-forum-Ideas & help"
                     assert not runtime.ready
         assert all(method == "GET" for method, _ in remote.requests)
+
+
+async def test_permission_preflight_binds_a_real_shape_forum_index(tmp_path):
+    """#1217 SC-1.4: type 11 posts under a type 15 parent get a planned forum index."""
+    config, exports = _real_forum_case(tmp_path)
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            runtime = await _permission_preflight_operation()(
+                config, MigrationState(), exports, session, mode="migration"
+            )
+        assert all(method == "GET" for method, _ in remote.requests)
+    index = next(c for c in runtime.plan.channels if c.source_key.startswith("forum-index-"))
+    assert index.source_key == "forum-index-forum-Ideas & help"
+    assert index.source_ids == frozenset({"222", "333"})
+
+
+def test_permission_index_sources_bind_a_carried_real_shape_forum():
+    """#1217 SC-1.5: a carried real-shape forum keeps its index binding."""
+    exports = [
+        DCEExport(
+            DCEGuild("111", "source"),
+            DCEChannel(cid, 11, "post", category_id="300", category="Ideas & help"),
+            is_thread=True,
+            parent_channel_name="Ideas & help",
+        )
+        for cid in ("222", "333")
+    ]
+    state = MigrationState(
+        channel_map={"222": "t222", "333": "t333", "forum-index-forum-Ideas & help": "tidx"},
+        channel_categories={"222": "forum-Ideas & help", "333": "forum-Ideas & help"},
+        forum_channel_members={"forum-Ideas & help": ["222", "333"]},
+    )
+    assert engine_module._permission_index_sources(
+        exports, state, forum_ids=frozenset({"300"})
+    ) == {"forum-index-forum-Ideas & help": ("222", "333")}
+
+
+async def test_permission_preflight_stops_when_real_forum_posts_differ(tmp_path):
+    """#1217 SC-1.6: posts sharing a name-keyed index with different access stop safely."""
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports = _real_forum_case(tmp_path, split_parents=True)
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as caught:
+                await _permission_preflight_operation()(
+                    config, MigrationState(), exports, session, mode="migration"
+                )
+        assert all(method == "GET" for method, _ in remote.requests)
+    assert caught.value.outcome.reason == "unsupported"
+    assert [problem.guidance for problem in caught.value.outcome.problems] == [
+        "Indexed source channels do not share one exact mapped access result"
+    ]
 
 
 async def test_permission_preflight_carried_channel_reads_without_correcting(tmp_path):
