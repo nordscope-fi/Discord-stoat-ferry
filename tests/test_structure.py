@@ -1685,6 +1685,84 @@ async def test_run_server_dry_run_deletes_nothing(tmp_path: Path) -> None:
     assert state.default_channel_ids == []
 
 
+def _reuse(m: aioresponses, channel: dict[str, object] | None) -> None:
+    m.get(f"{STOAT_URL}/servers/{_SRV}", payload={"_id": _SRV, "name": "Test"}, repeat=True)
+    m.patch(f"{STOAT_URL}/servers/{_SRV}", payload={}, repeat=True)
+    url = f"{STOAT_URL}/channels/{_GENERAL}"
+    if channel is None:
+        m.get(url, status=404, payload={"type": "NotFound"})
+    else:
+        m.get(url, payload=channel)
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_run_server_retries_a_saved_default_channel(tmp_path: Path) -> None:
+    """#1203 SC-2.2. Deleted on the next run, then never touched again."""
+    state = MigrationState(stoat_server_id=_SRV, default_channel_ids=[_GENERAL])
+    with aioresponses() as m:
+        _reuse(m, {"_id": _GENERAL, "channel_type": "TextChannel"})
+        m.delete(f"{STOAT_URL}/channels/{_GENERAL}", status=204)
+        await run_server(_make_config(tmp_path), state, [_make_export()], lambda e: None)
+    assert _deletes(m) == [f"{STOAT_URL}/channels/{_GENERAL}"]
+    assert state.default_channel_ids == []
+
+    with aioresponses() as again:
+        _reuse(again, {"_id": _GENERAL})
+        await run_server(_make_config(tmp_path), state, [_make_export()], lambda e: None)
+    assert not [u for (_meth, u) in again.requests if "/channels/" in str(u)]
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_run_server_saved_default_channel_already_gone(tmp_path: Path) -> None:
+    """#1203 SC-2.3. A 404 on the read clears the id with no delete and no warning."""
+    state = MigrationState(stoat_server_id=_SRV, default_channel_ids=[_GENERAL])
+    with aioresponses() as m:
+        _reuse(m, None)
+        await run_server(_make_config(tmp_path), state, [_make_export()], lambda e: None)
+    assert _deletes(m) == []
+    assert state.default_channel_ids == []
+    assert not [w for w in state.warnings if "default_channel" in w["type"]]
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_run_server_keeps_a_used_default_channel(tmp_path: Path) -> None:
+    """#1203 SC-2.4. A channel with messages now is left in place, and said so."""
+    state = MigrationState(stoat_server_id=_SRV, default_channel_ids=[_GENERAL])
+    with aioresponses() as m:
+        _reuse(m, {"_id": _GENERAL, "last_message_id": stoat_id(9)})
+        await run_server(_make_config(tmp_path), state, [_make_export()], lambda e: None)
+    assert _deletes(m) == []
+    assert state.default_channel_ids == []
+    kept = [w for w in state.warnings if w["type"] == "default_channel_kept"]
+    assert len(kept) == 1
+    assert _GENERAL in kept[0]["message"]
+
+
+async def test_run_server_interrupted_delete_completes_next_run(
+    tmp_path: Path, structure_binding_collaborator: MagicMock
+) -> None:
+    """#1203 SC-I1. Stop on an uncertain delete, rerun from the saved state, same end."""
+    structure_binding_collaborator.stop.return_value = PermissionSafetyError(
+        MagicMock(reason="write_uncertain", stage="application", effects="changes_possible")
+    )
+    with aioresponses() as m:
+        _create_with_general(m)
+        m.delete(f"{STOAT_URL}/channels/{_GENERAL}", status=500)
+        with pytest.raises(PermissionSafetyError):
+            await run_server(
+                _make_config(tmp_path), MigrationState(), [_make_export()], lambda e: None
+            )
+
+    resumed = load_state(tmp_path)
+    assert resumed.default_channel_ids == [_GENERAL]
+    with aioresponses() as m2:
+        _reuse(m2, {"_id": _GENERAL})
+        m2.delete(f"{STOAT_URL}/channels/{_GENERAL}", status=204)
+        await run_server(_make_config(tmp_path), resumed, [_make_export()], lambda e: None)
+    assert _deletes(m2) == [f"{STOAT_URL}/channels/{_GENERAL}"]
+    assert resumed.default_channel_ids == []
+
+
 @pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_warns_nsfw_cannot_apply_to_existing_server(tmp_path: Path) -> None:
     """SERVER warns when Stoat cannot apply NSFW to a reused server (#1168)."""

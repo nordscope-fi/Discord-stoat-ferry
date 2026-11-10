@@ -47,6 +47,7 @@ from discord_ferry.migrator.api import (
     api_edit_role,
     api_edit_role_ranks,
     api_edit_server,
+    api_fetch_channel,
     api_fetch_root,
     api_fetch_server,
     api_pin_message,
@@ -224,14 +225,45 @@ async def _remove_default_channels(
     config: FerryConfig,
     state: MigrationState,
     runtime: PermissionRuntime,
+    *,
+    retry: bool = False,
 ) -> None:
     """Delete the channels Stoat created with the server (#1203).
+
+    On a retry (a later run), each channel is read first: one already gone is
+    forgotten, and one with messages since creation is kept and reported.
 
     Only ids this state saved from its own create response are here, so a channel a
     person made, or one Ferry migrated, is never a candidate. A definite refusal warns
     and keeps the id for the next run. An uncertain outcome stops the run.
     """
     for channel_id in list(state.default_channel_ids):
+        if retry:
+            try:
+                channel: object = await api_fetch_channel(
+                    session, config.stoat_url, config.token, channel_id
+                )
+            except MigrationError as exc:
+                if str(exc).startswith("API error 404:"):
+                    state.default_channel_ids.remove(channel_id)
+                    save_state(state, config.output_dir)
+                continue  # Any other read failure: keep the id, delete nothing.
+            if not isinstance(channel, dict):
+                continue
+            if channel.get("last_message_id"):
+                state.default_channel_ids.remove(channel_id)
+                state.warnings.append(
+                    {
+                        "phase": "server",
+                        "type": "default_channel_kept",
+                        "message": (
+                            f"Stoat's default channel {channel_id} has messages now, "
+                            "so it was left in place."
+                        ),
+                    }
+                )
+                save_state(state, config.output_dir)
+                continue
         runtime.note_write()
         try:
             await api_delete_channel(session, config.stoat_url, config.token, channel_id)
@@ -310,6 +342,8 @@ async def run_server(
                     message=f"Using existing server {effective_server_id}",
                 )
             )
+            if state.default_channel_ids:
+                await _remove_default_channels(session, config, state, runtime, retry=True)
         else:
             # Determine name from config or first export's guild name.
             name: str
