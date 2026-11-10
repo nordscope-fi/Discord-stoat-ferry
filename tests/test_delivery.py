@@ -808,7 +808,7 @@ async def test_legacy_delivery_converts_only_complete_unambiguous_multipart(
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
-@pytest.mark.parametrize("permission", ["SendMessage", "MentionRoles"])
+@pytest.mark.parametrize("permission", ["SendMessage", "MentionRoles", "MentionEveryone"])
 async def test_delivery_receipt_corrected_rejection_mints_one_selected_attempt(
     tmp_path: Path, permission: str
 ):

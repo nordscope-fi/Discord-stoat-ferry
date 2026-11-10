@@ -2591,6 +2591,8 @@ async def test_message_slowmode_wait_rejects_second_cooldown(
         (403, {"type": "MissingPermission", "permission": "ManageMessages"}),
         (403, {"type": "MissingPermission", "permission": "MentionRoles", "extra": True}),
         (403, {"type": "MissingPermission", "permission": "MentionRoles", "location": 1}),
+        (403, {"type": "MissingPermission", "permission": "MentionEveryone", "extra": True}),
+        (403, {"type": "MissingPermission", "permission": "MentionEveryone", "location": 1}),
         (403, {"type": "MissingPermission", "permission": {}}),
         (403, {"type": "MissingPermission", "permission": []}),
         (403, {"type": "Other", "permission": "MentionRoles"}),
@@ -2626,7 +2628,7 @@ async def test_message_recovery_uncertain_response_never_reposts(
     assert sum(len(calls) for calls in mock_aiohttp.requests.values()) == 1
 
 
-@pytest.mark.parametrize("permission", ["SendMessage", "MentionRoles"])
+@pytest.mark.parametrize("permission", ["SendMessage", "MentionRoles", "MentionEveryone"])
 async def test_message_recovery_confirmed_message_permission_rejection(
     mock_aiohttp: aioresponses, permission: str
 ) -> None:
