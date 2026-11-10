@@ -53,6 +53,8 @@ from discord_ferry.discord.metadata import (
     _bad_id,
     _capture_source_channel,
     _permission_source_fingerprint,
+    forum_parent_ids,
+    is_forum_post,
     validate_permission_source,
 )
 from discord_ferry.errors import (
@@ -1860,7 +1862,8 @@ async def _prepare_permission_operation(
         for export in exports
         if export.channel.type != 4 and not (config.skip_threads and export.is_thread)
     ]
-    indexes = _permission_index_sources(selected, state)
+    forum_ids = forum_parent_ids(meta)
+    indexes = _permission_index_sources(selected, state, forum_ids=forum_ids)
     destinations = set(state.channel_map)
     if mode == "migration":
         if config.thread_strategy in {"merge", "archive"} and any(e.is_thread for e in selected):
@@ -1873,7 +1876,7 @@ async def _prepare_permission_operation(
             if export.channel.id in candidates:
                 continue
             candidates[export.channel.id] = export
-            if export.is_thread and export.channel.type in {15, 16} and export.parent_channel_name:
+            if is_forum_post(export, forum_ids):
                 new_indexes.add(f"forum-index-forum-{export.parent_channel_name}")
         carried = [e for sid, e in candidates.items() if sid in state.channel_map]
         future_channels = [e for sid, e in candidates.items() if sid not in state.channel_map]
@@ -2084,7 +2087,10 @@ async def _prepare_permission_operation(
 
 
 def _permission_index_sources(
-    exports: list[DCEExport], state: MigrationState
+    exports: list[DCEExport],
+    state: MigrationState,
+    *,
+    forum_ids: frozenset[str] = frozenset(),
 ) -> dict[str, tuple[str, ...]]:
     """Cross-check complete actual source membership without changing saved identity."""
 
@@ -2113,11 +2119,7 @@ def _permission_index_sources(
         sid = export.channel.id
         if _bad_id("source channel", sid) is not None:
             refuse()
-        group = (
-            f"forum-{export.parent_channel_name}"
-            if export.is_thread and export.channel.type in {15, 16} and export.parent_channel_name
-            else None
-        )
+        group = f"forum-{export.parent_channel_name}" if is_forum_post(export, forum_ids) else None
         if sid in selected and selected[sid] != group:
             refuse()
         selected[sid] = group
