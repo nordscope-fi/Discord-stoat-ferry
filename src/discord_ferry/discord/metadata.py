@@ -807,3 +807,28 @@ def load_bound_discord_metadata(
         export_guild_ids={e.guild.id for e in exports},
         configured_guild_id=config.discord_server_id,
     ).meta
+
+
+_FORUM_PARENT_TYPES = frozenset({15, 16})
+
+
+def forum_parent_ids(meta: DiscordMetadata | None) -> frozenset[str]:
+    """Ids of forum and media channels in the bound source evidence (#1217).
+
+    DCE cannot export a forum, so a real forum post is a type 11 thread whose
+    ``category_id`` names one of these channels.
+    """
+    if meta is None or meta.permission_source is None:
+        return frozenset()
+    return frozenset(
+        channel.id
+        for channel in meta.permission_source.channels
+        if channel.type in _FORUM_PARENT_TYPES
+    )
+
+
+def is_forum_post(export: DCEExport, forum_ids: frozenset[str] = frozenset()) -> bool:
+    """A thread whose parent is a forum or media channel, real (by id) or legacy (by type)."""
+    if not (export.is_thread and export.parent_channel_name):
+        return False
+    return export.channel.category_id in forum_ids or export.channel.type in _FORUM_PARENT_TYPES
