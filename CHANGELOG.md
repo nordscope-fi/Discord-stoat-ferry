@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.6.3] - 2026-11-10
+
+### Fixed
+
+- Accept trusted corporate root certificates that lack key identifiers on Python 3.13 and later, where OpenSSL's strict X.509 checks are on by default. Ferry now verifies as it does on 3.11 and 3.12 and in the desktop apps (#1202).
+
 ## [3.6.2] - 2026-11-10
 
 ### Fixed
