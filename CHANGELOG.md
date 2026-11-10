@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.6.5] - 2026-11-10
+
+### Fixed
+
+- Delete the empty "General" channel Stoat adds to every new server, after a migration or `ferry build` creates one. Only the channel Stoat reported when creating the server is deleted. During a migration, a refused delete is a warning and the next run tries again, and an uncertain one stops the run safely so the next run can try again. A channel that has messages by then is left in place, with a warning. `ferry build` keeps no progress file, so any failed delete there is a warning naming the channel (#1203).
+
 ## [3.6.4] - 2026-11-10
 
 ### Fixed
