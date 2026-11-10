@@ -5805,7 +5805,10 @@ async def run_build(
     own_session = session is None
     sess = session or new_session()
     try:
-        server_id = await api_create_server(sess, stoat_url, token, truncate_name(blueprint.name))
+        defaults: list[str] = []
+        server_id = await api_create_server(
+            sess, stoat_url, token, truncate_name(blueprint.name), default_channels=defaults
+        )
         on_event(
             MigrationEvent(
                 phase="build",
@@ -5813,6 +5816,22 @@ async def run_build(
                 message=f"Created server '{blueprint.name}' ({server_id})",
             )
         )
+        # Stoat's automatic "General" channel (#1203). The blueprint's own channels
+        # are created below and are never in this list.
+        for channel_id in defaults:
+            try:
+                await api_delete_channel(sess, stoat_url, token, channel_id)
+            except MigrationError:
+                on_event(
+                    MigrationEvent(
+                        phase="build",
+                        status="warning",
+                        message=(
+                            f"Could not delete Stoat's default channel {channel_id}; "
+                            "delete it by hand if you do not want it."
+                        ),
+                    )
+                )
 
         created_roles: list[tuple[int, str]] = []
         for role in blueprint.roles:
