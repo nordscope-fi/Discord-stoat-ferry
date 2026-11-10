@@ -31,6 +31,8 @@ from discord_ferry.discord.metadata import (
     DiscordMetadata,
     PermissionPair,
     RoleMeta,
+    forum_parent_ids,
+    is_forum_post,
     load_bound_discord_metadata,
 )
 from discord_ferry.discord.models import normalize_channel_position
@@ -1363,6 +1365,7 @@ async def run_channels(
         MigrationError: If any API call fails unrecoverably.
     """
     discord_metadata = load_bound_discord_metadata(config, exports)
+    forum_ids = forum_parent_ids(discord_metadata)
 
     # Snapshot already-mapped channels BEFORE the dedup scan so incremental
     # re-runs reuse carried Stoat IDs (no re-create) and the truncation budget
@@ -1414,7 +1417,7 @@ async def run_channels(
         # For forum/media channel threads (type 15/16), use a dedicated forum
         # category keyed by parent name instead of the original Discord category.
         effective_cat_id = channel.category_id
-        if channel.type in (15, 16) and export.is_thread and export.parent_channel_name:
+        if is_forum_post(export, forum_ids):
             forum_cat_key = f"forum-{export.parent_channel_name}"
             if forum_cat_key not in forum_categories:
                 forum_categories[forum_cat_key] = export.parent_channel_name

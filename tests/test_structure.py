@@ -4567,6 +4567,91 @@ async def test_run_channels_forum_threads_get_dedicated_category(
     assert categories[0]["channels"] == ["stoat-ft1"]  # type: ignore[index]
 
 
+def _parent_meta(parent_type: int):
+    """#1217: bound metadata whose source holds the export's parent with this type."""
+    from discord_ferry.discord import client
+    from discord_ferry.discord.metadata import DiscordMetadata, capture_permission_source
+
+    parent = client._parse_channel(
+        {"id": "cat1", "name": "Questions", "type": parent_type, "guild_id": "111"}
+    )
+    return DiscordMetadata(
+        "111", "now", 0, {}, {}, permission_source=capture_permission_source("111", [], [parent])
+    )
+
+
+def _real_shape_post():
+    return _make_export(
+        channel_id="ft1",
+        channel_name="how-to-install",
+        channel_type=11,
+        is_thread=True,
+        parent_channel_name="Questions",
+        category_id="cat1",
+        category="Questions",
+    )
+
+
+async def _route_once(config, state, monkeypatch, parent_type):
+    monkeypatch.setattr(
+        structure_module, "load_bound_discord_metadata", lambda *_a, **_k: _parent_meta(parent_type)
+    )
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ft1", "name": "x"})
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-idx", "name": "idx"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
+        await run_channels(config, state, [_real_shape_post()], lambda _e: None)
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
+@pytest.mark.parametrize(("parent_type", "is_forum"), [(15, True), (16, True), (0, False)])
+async def test_run_channels_routes_real_shape_forum_posts(
+    channel_attributes_only,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_type: int,
+    is_forum: bool,
+) -> None:
+    """#1217 SC-1.7 to SC-1.9: a type 11 post under a forum parent gets the forum category."""
+    state = MigrationState(stoat_server_id="srv1")
+    await _route_once(_make_config(tmp_path, upload_delay=0), state, monkeypatch, parent_type)
+    if is_forum:
+        assert state.forum_category_names == {"forum-Questions": "Questions"}
+        assert state.channel_categories["ft1"] == "forum-Questions"
+        assert state.forum_channel_members == {"forum-Questions": ["ft1"]}
+        assert state.channel_map["forum-index-forum-Questions"] == "stoat-idx"
+    else:
+        assert state.forum_category_names == {}
+        assert not any(key.startswith("forum-index-") for key in state.channel_map)
+        assert state.forum_channel_members == {}
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
+@pytest.mark.parametrize("rerun", ["incremental", "resume"])
+async def test_run_channels_forum_rerun_creates_nothing_new(
+    channel_attributes_only, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rerun: str
+) -> None:
+    """#1217 SC-2.1, SC-2.2: a re-run reuses the forum category, index and post channel."""
+    state = MigrationState(stoat_server_id="srv1")
+    await _route_once(_make_config(tmp_path, upload_delay=0), state, monkeypatch, 15)
+    assert state.forum_category_names == {"forum-Questions": "Questions"}
+    before = (
+        dict(state.channel_map),
+        dict(state.category_map),
+        {key: list(value) for key, value in state.forum_channel_members.items()},
+    )
+    config = _make_config(tmp_path, upload_delay=0, **{rerun: True})
+    with aioresponses() as m:
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
+        await run_channels(config, state, [_real_shape_post()], lambda _e: None)
+    assert not any(method == "POST" for method, _ in m.requests)
+    assert (
+        dict(state.channel_map),
+        dict(state.category_map),
+        {key: list(value) for key, value in state.forum_channel_members.items()},
+    ) == before
+
+
 @pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_truncates_at_200(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase truncates to 200 channels, dropping threads first."""
