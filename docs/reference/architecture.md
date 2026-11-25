@@ -913,6 +913,8 @@ the equivalent Stoat bitfield.
 | MODERATE_MEMBERS | 40 | TimeoutMembers | 8 |
 | BYPASS_SLOWMODE | 52 | BypassSlowmode | 39 |
 
+A migration into an existing server by an account that is not the owner needs two more grants on Ferry's assigned role in the receiving channels. It needs `MentionEveryone` when the export contains `@everyone` or `@online`, and `MentionRoles` when it sends mapped role mentions. Stoat refuses the whole message without them. Grant both on Ferry's role, never on the server default.
+
 **Special cases**:
 
 - **ADMINISTRATOR** (Discord bit 3): On a server role or the `@everyone` server default, expands
