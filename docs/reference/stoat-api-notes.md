@@ -185,8 +185,8 @@ All **34** defined bits:
 | DeafenMembers | 34 | |
 | MoveMembers | 35 | |
 | Listen | 36 | **Receive** audio and video — see below |
-| MentionEveryone | 37 | |
-| MentionRoles | 38 | |
+| MentionEveryone | 37 | Needed by a non-owner migration to send `@everyone` or `@online`; Stoat refuses the message otherwise |
+| MentionRoles | 38 | Needed by a non-owner migration to send mapped role mentions |
 | BypassSlowmode | 39 | |
 | ViewAuditLogs | 40 | |
 

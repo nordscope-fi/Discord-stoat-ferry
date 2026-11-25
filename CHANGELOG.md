@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the `--checkpoint-interval` docs, which promised a replay of at most N messages though a save also needs 5 seconds since the last one, and the dotenv docs, which said the working folder is searched when Ferry searches from its install directory (#1299, #1245).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
+- Note in the reference permission tables that a migration by an account that is not the server owner needs `MentionEveryone` for `@everyone` and `@online`, and `MentionRoles` for role mentions (#1626).
 
 ## [3.6.6] - 2026-11-25
 
