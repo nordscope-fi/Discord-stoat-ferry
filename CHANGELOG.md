@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.6.6] - 2026-11-25
+
+### Fixed
+
+- Name the permission Stoat refused when it rejects a message before creating it. The failure now reads, for example, "MentionEveryone permission was rejected before creation" in place of a generic message, so the missing grant is clear without reading the API response (#1625).
+
 ## [3.6.5] - 2026-11-10
 
 ### Fixed

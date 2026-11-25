@@ -522,7 +522,9 @@ async def _api_request_inner(
                             )
                         ):
                             raise MessageSendFailure(
-                                "Message send permission was rejected before creation",
+                                # The name is one of the three allowed above, never free text.
+                                f"{rejection['permission']} permission was rejected"
+                                " before creation",
                                 disposition="confirmed_rejected",
                                 http_status=403,
                                 error_type="MissingPermission",
