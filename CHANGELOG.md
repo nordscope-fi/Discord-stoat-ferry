@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 - Note in the reference permission tables that a migration by an account that is not the server owner needs `MentionEveryone` for `@everyone` and `@online`, and `MentionRoles` for role mentions (#1626).
+- Update NiceGUI from 4.0.0 to 4.1.0, which keeps the tab storage of connected browser tabs when old tab storage is pruned, stops rewriting storage files on every load, and reloads the page instead of showing "Connection lost" forever after an expired session.
 
 ## [3.6.6] - 2026-11-25
 

@@ -1842,13 +1842,12 @@ wheels = [
 
 [[package]]
 name = "nicegui"
-version = "4.0.0"
+version = "4.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
     { name = "anyio" },
-    { name = "certifi" },
     { name = "docutils" },
     { name = "fastapi" },
     { name = "h11" },
@@ -1869,9 +1868,9 @@ dependencies = [
     { name = "tinycss2" },
     { name = "uvicorn", extra = ["standard"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c3/76/3a89c1f2b78a5669b29f4a42dba01f47b017283ae10dc71155723604139e/nicegui-4.0.0.tar.gz", hash = "sha256:5d064462ad270b4a7756f641856a4ff0273a4d1786b4fc6a0b27958cc3ae16e3", size = 21434642, upload-time = "2026-11-04T15:24:49.478Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d0/5a/81ff137675699d6bc6dafec7c2b0fbe00c8861757df5f2df342ee4ae22cd/nicegui-4.1.0.tar.gz", hash = "sha256:1091051139d52219e9a64108113a2a4d7d044a1c4d04351cd55b8c1a346b77d9", size = 21441236, upload-time = "2026-11-24T13:07:28.453Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ff/a0/f3680dad832f9a2821a771cac5f36c163a1530bcf86c66d3e3d9c6359918/nicegui-4.0.0-py3-none-any.whl", hash = "sha256:df997c07d638b2669159ac30b472a750c719a525cdff97a185d18339e1eda1de", size = 8216541, upload-time = "2026-11-04T15:24:45.068Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/13/aaf2ca81d58ed7b6b8e9300b5c9eb777876233b1fe5c2570e78207be093c/nicegui-4.1.0-py3-none-any.whl", hash = "sha256:b5393ec3f7a104fb304b6766f919420f8b2325f06ebf54f60f078c565f29fb63", size = 8224264, upload-time = "2026-11-24T13:07:25.271Z" },
 ]
 
 [[package]]
