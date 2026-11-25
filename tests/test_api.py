@@ -2688,6 +2688,7 @@ async def test_message_recovery_confirmed_message_permission_rejection(
     assert caught.value.disposition == "confirmed_rejected"
     assert caught.value.http_status == 403
     assert caught.value.error_type == "MissingPermission"
+    assert str(caught.value) == f"{permission} permission was rejected before creation"
     assert TOKEN not in str(caught.value)
     hook.assert_not_awaited()
 
