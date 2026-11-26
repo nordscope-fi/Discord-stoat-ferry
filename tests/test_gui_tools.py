@@ -1705,3 +1705,82 @@ async def test_build_page_uses_entered_stoat_url(
         await user.should_see("Server built (srv-123)")
 
     assert seen["url"] == "https://one-run.example"
+
+
+async def _render_tables(user: User, route: str, render: Callable[[], None]) -> list[object]:
+    """Render ``render`` on a throwaway page and return every ui.table on it."""
+    from nicegui import ElementFilter, ui
+
+    found: list[object] = []
+
+    @ui.page(route)
+    def _page() -> None:
+        render()
+        found.extend(ElementFilter(kind=ui.table, only_visible=False))
+
+    await user.open(route)
+    return found
+
+
+def _check_report_with(count: int):  # type: ignore[no-untyped-def]
+    from discord_ferry.migrator.verify import CheckReport
+
+    report = CheckReport()
+    for i in range(count):
+        report.add(name=f"chan-{i}", status="ok", kind="channel_present", detail="present")
+    return report
+
+
+def _repair_outcome_with(count: int):  # type: ignore[no-untyped-def]
+    from discord_ferry.migrator.verify import RepairOutcome
+
+    return RepairOutcome(
+        declined=[{"type": "channel_gone", "detail": f"chan-{i}"} for i in range(count)]
+    )
+
+
+# 25 rows or fewer keep today's table: NiceGUI's default {"rowsPerPage": 0} shows all rows
+# with no controls. Above 25, the table pages at 25 rows. The boundary is part of #1670.
+_PAGING_CASES = [(3, 0), (25, 0), (26, 25), (30, 25)]
+
+
+@pytest.mark.parametrize(("count", "rows_per_page"), _PAGING_CASES)
+async def test_check_table_pages_only_above_25_rows(
+    user: User, count: int, rows_per_page: int
+) -> None:
+    """#1670: the check results table pages at 25 rows only when it is longer than 25."""
+    from nicegui import ui
+
+    from discord_ferry import gui_tools
+
+    tables = await _render_tables(
+        user,
+        f"/_t_check_{count}",
+        lambda: gui_tools.render_check_report(_check_report_with(count)),
+    )
+    assert len(tables) == 1
+    table = tables[0]
+    assert isinstance(table, ui.table)
+    assert table.pagination == {"rowsPerPage": rows_per_page}
+    assert len(table.rows) == count
+
+
+@pytest.mark.parametrize(("count", "rows_per_page"), _PAGING_CASES)
+async def test_repair_declined_table_pages_only_above_25_rows(
+    user: User, count: int, rows_per_page: int
+) -> None:
+    """#1670: the "Could not fix" table pages at 25 rows only when it is longer than 25."""
+    from nicegui import ui
+
+    from discord_ferry import gui_tools
+
+    tables = await _render_tables(
+        user,
+        f"/_t_repair_{count}",
+        lambda: gui_tools.render_repair_outcome(_repair_outcome_with(count)),
+    )
+    assert len(tables) == 1
+    table = tables[0]
+    assert isinstance(table, ui.table)
+    assert table.pagination == {"rowsPerPage": rows_per_page}
+    assert len(table.rows) == count

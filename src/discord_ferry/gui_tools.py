@@ -117,6 +117,16 @@ def _repair_verdict(outcome: RepairOutcome, state: MigrationState) -> tuple[bool
     return False, "Repair complete.", "text-green-600"
 
 
+_RESULT_ROWS_PER_PAGE = 25
+
+
+def _result_table(columns: list[dict[str, Any]], rows: list[dict[str, Any]]) -> ui.table:
+    """A result table that pages at 25 rows, and stays unpaged at 25 rows or fewer."""
+    if len(rows) <= _RESULT_ROWS_PER_PAGE:
+        return ui.table(columns=columns, rows=rows)
+    return ui.table(columns=columns, rows=rows, pagination=_RESULT_ROWS_PER_PAGE)
+
+
 def render_check_report(report: CheckReport) -> None:
     """Render a CheckReport as a summary line and a per-result table.
 
@@ -134,7 +144,7 @@ def render_check_report(report: CheckReport) -> None:
         {"name": "status", "label": "Status", "field": "status", "align": "left"},
         {"name": "detail", "label": "Detail", "field": "detail", "align": "left"},
     ]
-    ui.table(columns=columns, rows=_check_rows(report)).classes("w-full mt-2")
+    _result_table(columns, _check_rows(report)).classes("w-full mt-2")
 
 
 def render_repair_outcome(outcome: RepairOutcome) -> None:
@@ -172,7 +182,7 @@ def render_repair_outcome(outcome: RepairOutcome) -> None:
             }
             for w in outcome.declined
         ]
-        ui.table(columns=columns, rows=rows).classes("w-full mt-1")
+        _result_table(columns, rows).classes("w-full mt-1")
 
 
 def _probe_rows(report: ProbeReport) -> list[dict[str, str]]:
