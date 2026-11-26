@@ -1214,7 +1214,9 @@ async def run_migration(
 
             # Permission preflight precedes the existing description-based lock write.
             if config.server_id and not config.dry_run:
-                lock_acquired = await _acquire_migration_lock(config, state, session, on_event)
+                lock_acquired = await _acquire_migration_lock(
+                    config, state, session, on_event, stop_on_failure=True
+                )
             await _run_phases(config, state, exports, on_event, runnable_phases, phase_overrides)
         finally:
             try:
@@ -1490,11 +1492,52 @@ _FERRY_LOCK_MARKER = "[FERRY_LOCK:"
 _LOCK_EXPIRY_SECONDS = 86400  # 24 hours
 
 
+def _lock_unavailable(
+    config: FerryConfig,
+    state: MigrationState,
+    on_event: EventCallback,
+    *,
+    stop_on_failure: bool,
+    cause: str,
+) -> bool:
+    """Report a lock that could not be taken: stop the run, or warn and continue.
+
+    Only the migration path sets ``stop_on_failure``. Rollback keeps today's
+    warning-only behaviour and gates on the ``False`` this returns.
+    """
+    if stop_on_failure and not config.force_unlock:
+        raise MigrationError(
+            _safe(config, f"{cause} Pass --force-unlock to continue without a lock.")
+        )
+    if stop_on_failure:
+        message = _safe(config, f"{cause} Continuing without a migration lock.")
+        state.warnings.append({"phase": "connect", "type": "lock_unavailable", "message": message})
+    else:
+        message = _safe(config, cause)
+    on_event(MigrationEvent(phase="connect", status="warning", message=message))
+    return False
+
+
+async def _lock_marker_landed(
+    config: FerryConfig, session: aiohttp.ClientSession, lock_marker: str
+) -> bool:
+    """Return True when a write that raised still stored this run's exact marker."""
+    try:
+        server = await api_fetch_server(
+            session, config.stoat_url, config.token, config.server_id or ""
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    return lock_marker in (server.get("description", "") or "")
+
+
 async def _acquire_migration_lock(
     config: FerryConfig,
     state: MigrationState,
     session: aiohttp.ClientSession,
     on_event: EventCallback,
+    *,
+    stop_on_failure: bool = False,
 ) -> bool:
     """S17: Acquire advisory migration lock on the target server.
 
@@ -1511,21 +1554,21 @@ async def _acquire_migration_lock(
         True if lock was successfully acquired, False if skipped (no server_id).
 
     Raises:
-        MigrationError: If a live lock is detected and force_unlock is False.
+        MigrationError: If a live lock is detected and force_unlock is False, or if
+            the lock cannot be taken, ``stop_on_failure`` is set, and force_unlock is False.
     """
     try:
         server = await api_fetch_server(
             session, config.stoat_url, config.token, config.server_id or ""
         )
     except Exception as exc:  # noqa: BLE001
-        on_event(
-            MigrationEvent(
-                phase="connect",
-                status="warning",
-                message=_safe(config, f"Could not fetch server for lock check: {exc}"),
-            )
+        return _lock_unavailable(
+            config,
+            state,
+            on_event,
+            stop_on_failure=stop_on_failure,
+            cause=f"Could not fetch server for lock check: {exc}",
         )
-        return False
 
     description: str = server.get("description", "") or ""
     lock_ts: float | None = None
@@ -1567,18 +1610,17 @@ async def _acquire_migration_lock(
     new_description = f"{description} {lock_marker}".strip() if description else lock_marker
 
     if len(new_description) > SERVER_DESCRIPTION_MAX_CHARS:
-        on_event(
-            MigrationEvent(
-                phase="connect",
-                status="warning",
-                message=(
-                    f"The server description is {len(description)} characters, too long to "
-                    f"add the migration lock (Stoat allows {SERVER_DESCRIPTION_MAX_CHARS} in "
-                    "total). Shorten the server description."
-                ),
-            )
+        return _lock_unavailable(
+            config,
+            state,
+            on_event,
+            stop_on_failure=stop_on_failure,
+            cause=(
+                f"The server description is {len(description)} characters, too long to "
+                f"add the migration lock (Stoat allows {SERVER_DESCRIPTION_MAX_CHARS} in "
+                "total). Shorten the server description."
+            ),
         )
-        return False
 
     try:
         await api_edit_server(
@@ -1599,14 +1641,23 @@ async def _acquire_migration_lock(
         )
         return True
     except Exception as exc:  # noqa: BLE001
-        on_event(
-            MigrationEvent(
-                phase="connect",
-                status="warning",
-                message=_safe(config, f"Could not acquire migration lock: {exc}"),
+        if stop_on_failure and await _lock_marker_landed(config, session, lock_marker):
+            state.migration_lock_marker = lock_marker
+            on_event(
+                MigrationEvent(
+                    phase="connect",
+                    status="progress",
+                    message=f"Migration lock acquired on server {config.server_id}",
+                )
             )
+            return True
+        return _lock_unavailable(
+            config,
+            state,
+            on_event,
+            stop_on_failure=stop_on_failure,
+            cause=f"Could not acquire migration lock: {exc}",
         )
-        return False
 
 
 async def _release_migration_lock(
@@ -5561,7 +5612,8 @@ async def run_rollback(
         init_request_semaphore(config.max_concurrent_requests)
 
         # Lock gate — MUST run before the try, since _acquire_migration_lock
-        # returns False on PATCH failure rather than raising. Wrapping inside
+        # (called here without stop_on_failure) returns False on fetch, length
+        # or PATCH failure rather than raising. Wrapping inside
         # the try would let `finally` invoke _release_migration_lock on a lock
         # that was never written. The acquire helper does raise on live-lock
         # conflict — that raise propagates here, before the try is entered.
