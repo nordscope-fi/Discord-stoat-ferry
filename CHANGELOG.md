@@ -26,6 +26,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - The test suite no longer passes the caller's git location variables (`GIT_DIR`, `GIT_COMMON_DIR` and the rest) to the git commands it runs. A test's `git init` or `git config` could otherwise act on the caller's own repository and turn it into a bare one (#1639).
 
+## [3.7.9] - 2026-11-26
+
+### Fixed
+
+- Two forums with the same name now migrate to two Stoat categories and two forum index channels, each holding only its own forum's posts. Before, they shared one category and one index named after the forum. The second category is named "<name> (2)". Migrations already under way keep the categories they have, and two forums that were already merged stay merged (#1640).
+
 ## [3.7.8] - 2026-11-26
 
 ### Fixed
