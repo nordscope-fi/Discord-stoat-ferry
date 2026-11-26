@@ -2683,11 +2683,38 @@ class _LoopbackHostGuard:
 
 
 def _install_host_guard() -> None:
-    """Put the Host allowlist in front of every route, including the socket.io mount."""
+    """Put the Host and Origin allowlists in front of every route, outermost.
+
+    NiceGUI adds its session and request-tracking middleware inside ``Server.run``,
+    after this call, and Starlette puts the last-added middleware outermost. The
+    request-tracking layer writes a session id on every request, so a guard left
+    inside it would still hand a refused request a cookie and a user storage entry.
+    Starlette builds the stack once, on the first ASGI call, so the guard is moved
+    to the front at that moment. A startup hook would be too late: the first call
+    is the lifespan scope, and the stack already exists when startup handlers run.
+    """
     # `Middleware.cls` is typed as a factory, so compare it as a plain object.
     registered: list[object] = [m.cls for m in app.user_middleware]
     if _LoopbackHostGuard not in registered:
         app.add_middleware(_LoopbackHostGuard)
+    if getattr(app.build_middleware_stack, "_ferry_guard_first", False):
+        return
+    original = app.build_middleware_stack
+
+    def build_with_guard_first() -> Any:
+        # Read the list now: tests rebind it. Move, never insert.
+        current = app.user_middleware
+        classes: list[object] = [m.cls for m in current]
+        if _LoopbackHostGuard in classes:
+            guard = current[classes.index(_LoopbackHostGuard)]
+            current[:] = [
+                guard,
+                *(m for m, c in zip(current, classes, strict=True) if c is not _LoopbackHostGuard),
+            ]
+        return original()
+
+    build_with_guard_first._ferry_guard_first = True  # type: ignore[attr-defined]  # marks the wrapper so a second install is a no-op
+    app.build_middleware_stack = build_with_guard_first  # type: ignore[method-assign]  # Starlette calls it through the instance
 
 
 # ---------------------------------------------------------------------------
