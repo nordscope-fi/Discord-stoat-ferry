@@ -1692,19 +1692,33 @@ async def _release_migration_lock(
             session, config.stoat_url, config.token, config.server_id or ""
         )
         description: str = server.get("description", "") or ""
-        lock_start = description.find(_FERRY_LOCK_MARKER)
-        if lock_start != -1:
-            lock_end = description.find("]", lock_start)
-            if lock_end != -1:
-                description = description[:lock_start] + description[lock_end + 1 :]
-                description = description.strip()
-                await api_edit_server(
-                    session,
-                    config.stoat_url,
-                    config.token,
-                    config.server_id or "",
-                    description=description,
+        # #1677: remove only this run's own marker (exact match), never another run's.
+        own_marker = state.migration_lock_marker
+        marker_start = description.find(own_marker) if own_marker else -1
+        if marker_start == -1:
+            state.migration_lock_marker = ""
+            on_event(
+                MigrationEvent(
+                    phase="connect",
+                    status="warning",
+                    message=(
+                        "This run's migration lock marker was not found on the server, "
+                        "so nothing was removed."
+                    ),
                 )
+            )
+            return
+        before = description[:marker_start]
+        after = description[marker_start + len(own_marker) :]
+        if before.endswith(" ") and after.startswith(" "):
+            after = after[1:]
+        await api_edit_server(
+            session,
+            config.stoat_url,
+            config.token,
+            config.server_id or "",
+            description=(before + after).strip(),
+        )
         state.migration_lock_marker = ""
         on_event(
             MigrationEvent(

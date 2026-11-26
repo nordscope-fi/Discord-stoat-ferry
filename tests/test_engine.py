@@ -13174,3 +13174,74 @@ async def test_padded_server_id_is_a_mismatch_shown_verbatim(tmp_path: Path) -> 
     with pytest.raises(MigrationError) as caught:
         await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
     assert f"'{padded}'" in str(caught.value)
+
+
+# ---------------------------------------------------------------------------
+# #1677: release removes only this run's own lock marker
+# ---------------------------------------------------------------------------
+
+_OWN_LOCK = "[FERRY_LOCK:1700000200:me]"
+_OTHER_LOCK = "[FERRY_LOCK:1700000100:other]"
+
+
+async def _run_release(
+    tmp_path: Path, description: str, own_marker: str
+) -> tuple[list[str], list[MigrationEvent], MigrationState]:
+    """Run _release_migration_lock; return the PATCHed descriptions, events and state."""
+    from discord_ferry.core.engine import _release_migration_lock
+
+    config = _make_config(tmp_path, server_id="srv1")
+    state = MigrationState()
+    state.migration_lock_marker = own_marker
+    events: list[MigrationEvent] = []
+    with aioresponses() as m:
+        m.get(
+            "https://api.test/servers/srv1",
+            payload={"_id": "srv1", "description": description},
+        )
+        m.patch("https://api.test/servers/srv1", payload={}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            await _release_migration_lock(config, state, session, events.append)
+        patched: list[str] = []
+        for (method, _url), calls in m.requests.items():
+            if method == "PATCH":
+                for call in calls:
+                    patched.append(call.kwargs["json"]["description"])
+    return patched, events, state
+
+
+async def test_release_removes_own_marker_not_the_other_runs(tmp_path: Path) -> None:
+    """#1677: with two markers, only this run's own is removed."""
+    patched, _events, state = await _run_release(tmp_path, f"{_OTHER_LOCK} {_OWN_LOCK}", _OWN_LOCK)
+    assert patched == [_OTHER_LOCK]
+    assert state.migration_lock_marker == ""
+
+
+async def test_release_removes_own_marker_when_it_comes_first(tmp_path: Path) -> None:
+    patched, _events, _state = await _run_release(tmp_path, f"{_OWN_LOCK} {_OTHER_LOCK}", _OWN_LOCK)
+    assert patched == [_OTHER_LOCK]
+
+
+async def test_release_own_marker_absent_sends_no_edit_and_warns(tmp_path: Path) -> None:
+    patched, events, state = await _run_release(tmp_path, _OTHER_LOCK, _OWN_LOCK)
+    assert patched == []
+    assert any(
+        e.phase == "connect" and e.status == "warning" and "not found" in e.message for e in events
+    )
+    assert state.migration_lock_marker == ""
+
+
+async def test_release_empty_state_marker_sends_no_edit(tmp_path: Path) -> None:
+    patched, events, _state = await _run_release(tmp_path, _OTHER_LOCK, "")
+    assert patched == []
+    assert any(e.status == "warning" and "not found" in e.message for e in events)
+
+
+async def test_release_own_marker_is_whole_description(tmp_path: Path) -> None:
+    patched, _events, _state = await _run_release(tmp_path, _OWN_LOCK, _OWN_LOCK)
+    assert patched == [""]
+
+
+async def test_release_keeps_user_text_with_single_spacing(tmp_path: Path) -> None:
+    patched, _events, _state = await _run_release(tmp_path, f"before {_OWN_LOCK} after", _OWN_LOCK)
+    assert patched == ["before after"]
