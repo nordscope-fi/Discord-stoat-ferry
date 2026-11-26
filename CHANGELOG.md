@@ -21,6 +21,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Note in the reference permission tables that a migration by an account that is not the server owner needs `MentionEveryone` for `@everyone` and `@online`, and `MentionRoles` for role mentions (#1626).
 - Update NiceGUI from 4.0.0 to 4.1.0, which keeps the tab storage of connected browser tabs when old tab storage is pruned, stops rewriting storage files on every load, and reloads the page instead of showing "Connection lost" forever after an expired session.
 
+## [3.7.1] - 2026-11-26
+
+### Fixed
+
+- An `--incremental` or `--resume` run whose `--server-id` names a different Stoat server than the one recorded in its saved progress now stops before making any change, naming both servers and how to continue. Before, it reused ids saved from the first server, and could delete that server's empty default channel (#1653).
+
 ## [3.7.0] - 2026-11-25
 
 ### Changed

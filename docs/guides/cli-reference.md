@@ -100,7 +100,7 @@ does not move, replace, or delete those files.
 | `--export-dir PATH` | | | Path to DCE exports (offline mode) |
 | `--stoat-url TEXT` | `STOAT_URL` | *(required)* | Stoat API base URL (e.g. `https://api.stoat.chat`) |
 | `--token TEXT` | `STOAT_TOKEN` | *(required)* | Your Stoat user token (copied from your browser, see [setup guide](../getting-started/setup-stoat.md#2-get-your-stoat-user-token)). Prefer the `STOAT_TOKEN` environment variable |
-| `--server-id TEXT` | | | Migrate into an existing Stoat server by ID |
+| `--server-id TEXT` | | | Migrate into an existing Stoat server by ID. With `--incremental` or `--resume`, it must match the server in the saved progress, or Ferry stops before making any change |
 | `--server-name TEXT` | | | Name for the new server (defaults to the Discord server name) |
 | `--create-invite` / `--no-create-invite` | | on | Create an invite link to the migrated server when the migration finishes. The invite URL is printed in the completion summary and included in the reports. |
 | `--invite-channel-id TEXT` | | | Discord channel ID to base the invite on. By default Ferry picks the first eligible text channel. |

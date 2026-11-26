@@ -233,6 +233,14 @@ If the window will not close, or Ferry does not start again, quit the leftovers 
 | **Cause** | Before migrating into an existing server, Ferry adds a short lock marker to the server description so a second run cannot write into the same server at once. It stops when it cannot read the server, cannot write the marker, or the description has no room for it. Stoat allows 1024 characters in a server description. |
 | **Solution** | For a network or permission problem, fix it and run again. For a long description, shorten it in Stoat's server settings. To continue without a lock, add `--force-unlock`, or tick **Force unlock** in the GUI's Advanced Options. Ferry then records a warning in the report. |
 
+### Saved progress belongs to another server
+
+| | |
+|---|---|
+| **Symptom** | Ferry stops before migrating with "The saved progress in ... belongs to Stoat server ..., but --server-id is ..." |
+| **Cause** | `--incremental` and `--resume` reuse the channel, role and message ids saved from the server the earlier run migrated into. `--server-id` named a different server, so those ids would point at the wrong place. |
+| **Solution** | To continue the earlier migration, run again without `--server-id`, or with the server id the message names as saved. To migrate into the other server, start a fresh migration in a new output folder. |
+
 ### Stale resume flag on relaunch
 
 | | |
