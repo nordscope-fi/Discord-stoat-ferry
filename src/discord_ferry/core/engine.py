@@ -82,6 +82,7 @@ from discord_ferry.exporter.staging import (
     validate_coverage,
 )
 from discord_ferry.migrator.api import (
+    SERVER_DESCRIPTION_MAX_CHARS,
     api_create_channel,
     api_create_invite,
     api_create_role,
@@ -1564,6 +1565,20 @@ async def _acquire_migration_lock(
     hostname = socket.gethostname()
     lock_marker = f"{_FERRY_LOCK_MARKER}{ts}:{hostname}]"
     new_description = f"{description} {lock_marker}".strip() if description else lock_marker
+
+    if len(new_description) > SERVER_DESCRIPTION_MAX_CHARS:
+        on_event(
+            MigrationEvent(
+                phase="connect",
+                status="warning",
+                message=(
+                    f"The server description is {len(description)} characters, too long to "
+                    f"add the migration lock (Stoat allows {SERVER_DESCRIPTION_MAX_CHARS} in "
+                    "total). Shorten the server description."
+                ),
+            )
+        )
+        return False
 
     try:
         await api_edit_server(
