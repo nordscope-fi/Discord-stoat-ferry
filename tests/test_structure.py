@@ -4977,6 +4977,90 @@ async def test_run_channels_dry_run_writes_no_owner_map(
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_run_channels_files_a_later_second_forum_post_under_its_own_key(
+    channel_attributes_only, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1640 SC-1.6: run 2 holds only forum 301's new post; the metadata lists forums only."""
+    _bind_forums(monkeypatch, "300", "301")
+    state = MigrationState(
+        stoat_server_id="srv1",
+        channel_map={"222": "stoat-222", f"forum-index-{PLAIN_FORUM}": "stoat-idx"},
+        category_map={PLAIN_FORUM: "stoat-cat"},
+        category_names={PLAIN_FORUM: "Ideas & help"},
+        forum_category_names={PLAIN_FORUM: "Ideas & help"},
+        forum_channel_members={PLAIN_FORUM: ["222"]},
+        channel_categories={"222": PLAIN_FORUM},
+        forum_key_forums={PLAIN_FORUM: ["300"]},
+    )
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-444", "name": "x"})
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-idx2", "name": "x"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
+        await run_channels(
+            _make_config(tmp_path, upload_delay=0, incremental=True),
+            state,
+            [_forum_post("444", "301")],
+            lambda _e: None,
+        )
+    assert state.channel_categories["444"] == SECOND_FORUM
+    assert state.forum_channel_members == {PLAIN_FORUM: ["222"], SECOND_FORUM: ["444"]}
+    assert state.forum_key_forums == {PLAIN_FORUM: ["300"], SECOND_FORUM: ["301"]}
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_run_channels_adds_a_forum_id_only_to_an_existing_entry(
+    channel_attributes_only, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1640: a legacy export (no forum id) writes no id, and a keyless merged key gains none."""
+    _bind_forums(monkeypatch, "300")
+    state = MigrationState(stoat_server_id="srv1")
+    legacy = _make_export(
+        channel_id="9",
+        channel_name="old-post",
+        channel_type=15,
+        is_thread=True,
+        parent_channel_name="Questions",
+        category_id="999",
+    )
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-9", "name": "x"})
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-idx", "name": "x"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
+        await run_channels(_make_config(tmp_path, upload_delay=0), state, [legacy], lambda _e: None)
+    assert "forum-Questions" in state.category_map
+    assert state.forum_key_forums == {}
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_run_channels_records_a_second_forum_under_a_merged_key(
+    channel_attributes_only, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1640: a merged entry grows when another real forum's post is filed under its key."""
+    _bind_forums(monkeypatch, "300", "301", "302")
+    state = MigrationState(
+        stoat_server_id="srv1",
+        channel_map={"222": "stoat-222", f"forum-index-{PLAIN_FORUM}": "stoat-idx"},
+        category_map={PLAIN_FORUM: "stoat-cat"},
+        category_names={PLAIN_FORUM: "Ideas & help"},
+        forum_category_names={PLAIN_FORUM: "Ideas & help"},
+        forum_channel_members={PLAIN_FORUM: ["222"]},
+        channel_categories={"222": PLAIN_FORUM},
+        forum_key_forums={PLAIN_FORUM: ["300", "301"]},
+    )
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-666", "name": "x"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
+        await run_channels(
+            _make_config(tmp_path, upload_delay=0, incremental=True),
+            state,
+            [_forum_post("666", "302")],
+            lambda _e: None,
+        )
+    assert state.channel_categories["666"] == PLAIN_FORUM
+    assert state.forum_key_forums == {PLAIN_FORUM: ["300", "301", "302"]}
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_truncates_at_200(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase truncates to 200 channels, dropping threads first."""
     events: list[MigrationEvent] = []
