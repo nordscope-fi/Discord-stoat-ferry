@@ -137,7 +137,7 @@ Before you start, confirm you have these ready:
     | `--force` | Override freshness and soft error checks |
     | `--verify-uploads` | Compare requested media IDs with attachment and embed-media IDs on the delivered message. A mismatch keeps the delivered message and records a diagnostic. This does not compare original bytes or download, reupload, or resend files. |
     | `--cleanup-orphans` | Report unreferenced Autumn uploads |
-    | `--force-unlock` | Clear stale migration lock from server |
+    | `--force-unlock` | Clear a stale migration lock, or continue when Ferry cannot take one |
     | `--skip-dce-verify` | Skip DCE binary SHA-256 verification |
     | `--reaction-mode text\|native\|skip` | How reactions migrate (default `text`, appended as a summary; `native` calls the reaction API; `skip` drops them) |
     | `--min-thread-messages N` | Skip threads with fewer than N messages (default 0 = all threads) |

@@ -148,7 +148,7 @@ Ferry 2.0 adds several options. Decide which apply to your migration before you 
 | `--verify-uploads` | **CLI only.** Compare requested media IDs with attachment and embed-media IDs on the delivered message | A mismatch keeps the delivered message and records a diagnostic. This does not compare original bytes or download, reupload, or resend files. |
 | `--cleanup-orphans` | Detect and report files that were uploaded but never referenced (report-only, nothing is deleted) | Useful on self-hosted instances to find files worth cleaning up manually |
 | `--force` | Override the export freshness check (exports older than 30 days) | Only use if re-running with a known-good old export |
-| `--force-unlock` | Remove the advisory migration lock from the server | Use if a previous migration crashed and left the lock in place |
+| `--force-unlock` | Override the migration lock on the server, or continue without one | Use if a previous migration crashed and left the lock in place, or if Ferry stops because it cannot take the lock |
 | `--skip-dce-verify` | Skip SHA-256 verification of the DCE binary | Not recommended; use only in air-gapped environments where the hash is already verified |
 | `--reaction-mode text\|native\|skip` | How reactions are migrated | Use `native` if per-emoji reactions matter (slow); `skip` for the fastest migration |
 | `--min-thread-messages N` | Exclude threads below a message count | Use when your server has hundreds of low-activity threads |

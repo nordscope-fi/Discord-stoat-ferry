@@ -83,6 +83,7 @@ Below these, three labelled groups hold the tuning settings (since v2.7.0):
 | Checkpoint interval | 50 | How often migration state is saved (every N messages). Lower = safer but more disk I/O. |
 | Validate after migration | Off | After migration, fetch the server and compare channel/role counts against expectations. |
 | Incremental | Off | Reuse a prior migration and send new messages. Ferry requests a shorter export only after it proves current coverage; otherwise it runs a full export. Cannot be combined with Resume. |
+| Force unlock | Off | Continue when Ferry cannot take the server lock, and override a stale lock. Applies to the next run only. |
 
 !!! tip "Running into 'Too Many Requests' errors?"
     That error (code 429) means Stoat is asking Ferry to slow down. Increase the rate limit slider to 2.0 or 3.0 seconds. This slows the migration but eliminates the errors.

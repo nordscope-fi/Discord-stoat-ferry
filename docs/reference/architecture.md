@@ -1403,9 +1403,11 @@ Ferry places an **advisory lock** in the target Stoat server's description field
 marker `[FERRY_LOCK:{timestamp}:{hostname}]`. This prevents two Ferry instances from
 migrating into the same server simultaneously.
 
-- Lock is set at the start of the SERVER phase and cleared on completion or error
+- Lock is set before the migration phases run and cleared on completion or error
+- A migration into an existing server stops when Ferry cannot read the server, cannot write the marker, or the description has no room for it. Stoat allows 1024 characters in a server description, and Ferry never shortens the owner's text to make room
 - Locks older than 24 hours are considered stale
-- `--force-unlock` removes a stale lock without starting a migration
+- `--force-unlock` (GUI: Force unlock) overrides a stale lock, and lets a migration continue without a lock when one cannot be taken. Ferry records a warning when it does
+- When the Discord server description would not fit beside the marker, the server phase keeps the existing description so the lock stays in place, and records a warning
 
 Using the server description (not a dedicated channel) avoids consuming one of the 200-channel
 limit.
