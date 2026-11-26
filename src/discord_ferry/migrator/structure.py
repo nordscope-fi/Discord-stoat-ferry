@@ -1845,6 +1845,17 @@ async def run_channels(
                 # Guard against double-append on incremental re-runs.
                 if ch.id not in state.forum_channel_members.get(discord_cat_id, []):
                     state.forum_channel_members.setdefault(discord_cat_id, []).append(ch.id)
+                # Record a further real forum under a merged key, but only on an entry
+                # the category creation already wrote. Creating an entry here would give
+                # a pre-change merged key a single "owner" and split it on the next run.
+                recorded_forums = state.forum_key_forums.get(discord_cat_id)
+                post_forum_id = exp.channel.category_id if exp else ""
+                if (
+                    recorded_forums is not None
+                    and post_forum_id in forum_ids
+                    and post_forum_id not in recorded_forums
+                ):
+                    recorded_forums.append(post_forum_id)
 
             # Persist the effective Discord category for this channel (the forum
             # key for forum channels). Runs for BOTH carried and new channels so a
