@@ -1263,7 +1263,10 @@ class _RollbackProgressTracker:
 @click.option(
     "--server-id",
     default=None,
-    help="Override the Stoat server ID from state.json (rarely needed)",
+    help=(
+        "Stoat server ID, used only when the saved progress records none. "
+        "A different ID is refused."
+    ),
 )
 @click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation prompt(s)")
 @click.option(
