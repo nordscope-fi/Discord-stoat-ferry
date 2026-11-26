@@ -8729,3 +8729,57 @@ async def test_run_server_refuses_a_banners_folder_planted_as_a_link(tmp_path: P
     assert list(outside.iterdir()) == []
     assert uploads == []
     assert [w["type"] for w in state.warnings if "banner" in w["type"]] == ["banner_upload_failed"]
+
+
+_CAP_MARKER = "[FERRY_LOCK:9999999999:host]"  # 28 characters
+_CAP_FIT = 1024 - 1 - len(_CAP_MARKER)
+
+
+async def _description_bodies(
+    tmp_path: Path, desc: str, marker: str
+) -> tuple[list[dict[str, object]], MigrationState]:
+    config = _make_config(tmp_path, server_id="srv1")
+    state = MigrationState(stoat_server_id="srv1", migration_lock_marker=marker)
+    save_discord_metadata(_meta_with_description(desc), tmp_path)
+    bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "name": "S"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kw: bodies.append(kw.get("json", {})),  # type: ignore[misc]
+        )
+        await run_server(config, state, [_make_export()], lambda e: None)
+    return [b for b in bodies if "description" in b], state
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_description_cap_applies_description_at_exact_limit(tmp_path: Path) -> None:
+    """SC-2.6: a Discord description that fits beside the marker is applied at 1024."""
+    bodies, state = await _description_bodies(tmp_path, "a" * _CAP_FIT, _CAP_MARKER)
+    assert len(bodies) == 1
+    sent = bodies[0]["description"]
+    assert isinstance(sent, str)
+    assert len(sent) == 1024
+    assert sent.endswith(_CAP_MARKER)
+    assert not [w for w in state.warnings if w.get("type") == "server_description_not_migrated"]
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_description_not_migrated_keeps_the_lock_one_over(tmp_path: Path) -> None:
+    """SC-2.5: one character more keeps the locked description and warns once."""
+    bodies, state = await _description_bodies(tmp_path, "a" * (_CAP_FIT + 1), _CAP_MARKER)
+    assert bodies == []
+    hits = [w for w in state.warnings if w.get("type") == "server_description_not_migrated"]
+    assert len(hits) == 1
+    assert hits[0]["phase"] == "server"
+    assert "a" * 50 not in hits[0]["message"]
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_description_cap_skipped_without_a_marker(tmp_path: Path) -> None:
+    """SC-2.7: with no lock marker the description is applied unchanged, as today."""
+    bodies, state = await _description_bodies(tmp_path, "Cosy", "")
+    assert [b["description"] for b in bodies] == ["Cosy"]
+    assert not [w for w in state.warnings if w.get("type") == "server_description_not_migrated"]
