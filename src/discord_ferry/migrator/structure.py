@@ -39,6 +39,7 @@ from discord_ferry.discord.metadata import (
 from discord_ferry.discord.models import normalize_channel_position
 from discord_ferry.errors import AutumnUploadError, MigrationError, PermissionSafetyError
 from discord_ferry.migrator.api import (
+    SERVER_DESCRIPTION_MAX_CHARS,
     api_create_channel,
     api_create_role,
     api_create_server,
@@ -547,10 +548,27 @@ async def run_server(
             server_kwargs: dict[str, Any] = {}
             if discord_meta.guild_description:
                 description = discord_meta.guild_description
-                # Preserve the advisory-lock marker the engine wrote (else this PATCH wipes it).
-                if state.migration_lock_marker:
-                    description = f"{description} {state.migration_lock_marker}"
-                server_kwargs["description"] = description
+                marker = state.migration_lock_marker
+                if marker and len(description) + 1 + len(marker) > SERVER_DESCRIPTION_MAX_CHARS:
+                    # Applying the description would drop the advisory lock mid-run,
+                    # so keep the locked description and say what was not migrated.
+                    state.warnings.append(
+                        {
+                            "phase": "server",
+                            "type": "server_description_not_migrated",
+                            "message": (
+                                f"The Discord server description ({len(description)} "
+                                "characters) is too long to apply alongside the migration "
+                                f"lock (Stoat allows {SERVER_DESCRIPTION_MAX_CHARS} in "
+                                "total), so the existing description was kept."
+                            ),
+                        }
+                    )
+                else:
+                    # Preserve the advisory-lock marker the engine wrote (else this PATCH wipes it).
+                    if marker:
+                        description = f"{description} {marker}"
+                    server_kwargs["description"] = description
             if effective_server_id and discord_meta.guild_nsfw:
                 state.warnings.append(
                     {
