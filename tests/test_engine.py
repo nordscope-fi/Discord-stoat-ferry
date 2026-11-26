@@ -1627,6 +1627,64 @@ def test_permission_index_sources_bind_a_carried_real_shape_forum():
     ) == {"forum-index-forum-Ideas & help": ("222", "333")}
 
 
+async def test_the_three_forum_key_sites_agree_for_two_same_named_forums(tmp_path):
+    """#1640 SC-1.4: new-index count, index grouping and the channels phase read one table.
+
+    The channels-phase leg is `test_run_channels_separates_two_same_named_forums` in
+    tests/test_structure.py, which asserts the same two literal keys below.
+    """
+    from discord_ferry.discord.metadata import (
+        forum_group_key,
+        forum_key_table,
+        forum_parent_ids,
+        load_bound_discord_metadata,
+    )
+
+    config, exports = _real_forum_case(tmp_path, split_parents=True)
+    meta = load_bound_discord_metadata(config, exports)
+    forum_ids = forum_parent_ids(meta)
+    table = forum_key_table(meta, MigrationState(), exports)
+    keys = [forum_group_key(e, forum_ids, table, {}) for e in exports]
+    assert keys == ["forum-Ideas & help", "forum-Ideas & help~301"]
+    assert engine_module._permission_index_sources(
+        exports, MigrationState(), forum_ids=forum_ids, forum_table=table
+    ) == {
+        "forum-index-forum-Ideas & help": ("222",),
+        "forum-index-forum-Ideas & help~301": ("333",),
+    }
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            runtime = await _permission_preflight_operation()(
+                config, MigrationState(), exports, session, mode="migration"
+            )
+    planned = {
+        c.source_key for c in runtime.plan.channels if c.source_key.startswith("forum-index-")
+    }
+    assert planned == {"forum-index-forum-Ideas & help", "forum-index-forum-Ideas & help~301"}
+
+
+def test_permission_index_sources_keep_a_saved_key_over_the_table():
+    """#1640 SC-3.2: a post saved under the plain key is kept when the table differs."""
+    exports = [
+        DCEExport(
+            DCEGuild("111", "source"),
+            DCEChannel("333", 11, "post", category_id="301", category="Ideas & help"),
+            is_thread=True,
+            parent_channel_name="Ideas & help",
+        )
+    ]
+    state = MigrationState(
+        channel_map={"333": "t333", "forum-index-forum-Ideas & help": "tidx"},
+        channel_categories={"333": "forum-Ideas & help"},
+        forum_channel_members={"forum-Ideas & help": ["333"]},
+    )
+    table = {"301": "forum-Ideas & help~301"}
+    assert engine_module._permission_index_sources(
+        exports, state, forum_ids=frozenset({"301"}), forum_table=table
+    ) == {"forum-index-forum-Ideas & help": ("333",)}
+
+
 async def test_permission_preflight_stops_when_real_forum_posts_differ(tmp_path):
     """#1217 SC-1.6: posts sharing a name-keyed index with different access stop safely."""
     from discord_ferry.errors import PermissionSafetyError
