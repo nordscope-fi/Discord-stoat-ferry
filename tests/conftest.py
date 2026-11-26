@@ -86,6 +86,19 @@ def _restore_discord_ferry_module_links() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _no_inherited_git_location(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every test's git commands inside the repositories the test creates (#1639).
+
+    A caller that exports GIT_DIR or GIT_COMMON_DIR (a git hook, a worktree tool) would
+    otherwise send a test's `git init` or `git config` to the caller's own repository.
+    On 2026-11-26 that rewrote the main checkout's config to core.bare=true. A test that
+    needs one of these variables sets it itself, after this fixture has run.
+    """
+    for key in [name for name in os.environ if name.startswith("GIT_")]:
+        monkeypatch.delenv(key)
+
+
+@pytest.fixture(autouse=True)
 def _unstarted_nicegui_app(monkeypatch: pytest.MonkeyPatch) -> None:
     """Let ``gui._run_gui()`` add its Host guard no matter which test ran before.
 

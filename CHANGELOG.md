@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Update NiceGUI from 4.0.0 to 4.1.0, which keeps the tab storage of connected browser tabs when old tab storage is pruned, stops rewriting storage files on every load, and reloads the page instead of showing "Connection lost" forever after an expired session.
 - Refresh the user guides and reference pages against the code: the resume and validate steps, `--validate-after` (it verifies every entity by id), forum post support since 3.6.4, the GUI tool pages and completion buttons, quoted error and note text, the CLI command count, release asset names, and stale numbers, paths and fields in the architecture and Stoat API notes.
 
+### Fixed
+
+- The test suite no longer passes the caller's git location variables (`GIT_DIR`, `GIT_COMMON_DIR` and the rest) to the git commands it runs. A test's `git init` or `git config` could otherwise act on the caller's own repository and turn it into a bare one (#1639).
+
 ## [3.7.7] - 2026-11-26
 
 ### Fixed
