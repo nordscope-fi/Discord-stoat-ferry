@@ -1345,6 +1345,29 @@ def test_rollback_missing_token(runner: CliRunner, tmp_path: Path) -> None:
     assert "--token is required" in result.output
 
 
+def test_rollback_refuses_a_different_server_id(runner: CliRunner, tmp_path: Path) -> None:
+    """#1678: a --server-id that differs from the saved server stops the command."""
+    _write_rollback_state(tmp_path)
+    result = runner.invoke(
+        main,
+        [
+            "rollback",
+            "--output-dir",
+            str(tmp_path),
+            "--server-id",
+            "SOME_OTHER_SERVER",
+            "--yes",
+            "--stoat-url",
+            "http://localhost",
+            "--token",
+            "test-token",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "Rollback failed" in result.output
+    assert "belongs to Stoat server" in result.output
+
+
 def test_rollback_calls_engine_yes_flag(runner: CliRunner, tmp_path: Path) -> None:
     """SC-2: CLI happy path with --yes — calls run_rollback with correct config."""
     _write_rollback_state(tmp_path)

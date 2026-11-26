@@ -147,6 +147,49 @@ def test_validate_uses_state_id(tmp_path: Path) -> None:
     assert _validate_rollback_inputs(state, config) == "srv99"
 
 
+def test_validate_refuses_a_different_server_id(tmp_path: Path) -> None:
+    """#1678: --server-id naming another server is refused, not silently ignored."""
+    state = MigrationState(stoat_server_id="SERVER_A")
+    config = _make_config(tmp_path, server_id="SERVER_B")
+    with pytest.raises(MigrationError, match="belongs to Stoat server") as caught:
+        _validate_rollback_inputs(state, config)
+    message = str(caught.value)
+    assert "SERVER_A" in message
+    assert "SERVER_B" in message
+    assert str(tmp_path) in message
+
+
+def test_validate_accepts_a_matching_server_id(tmp_path: Path) -> None:
+    state = MigrationState(stoat_server_id="SERVER_A")
+    config = _make_config(tmp_path, server_id="SERVER_A")
+    assert _validate_rollback_inputs(state, config) == "SERVER_A"
+
+
+async def test_run_rollback_refuses_before_any_request(tmp_path: Path) -> None:
+    """#1678: the refusal comes before the lock and before any HTTP request.
+
+    No route is registered and the lock is not forced, so an unmocked lock fetch
+    would raise a different error; matching the refusal text rules that out.
+    """
+    state = MigrationState(stoat_server_id="SERVER_A")
+    config = _make_config(tmp_path, server_id="SERVER_B", force_unlock=False)
+    with aioresponses() as m:
+        with pytest.raises(MigrationError, match="belongs to Stoat server"):
+            await run_rollback(config, state, exports=[], on_event=lambda _e: None)
+        assert m.requests == {}
+    assert state.rollback_progress is None
+
+
+async def test_dry_run_state_is_refused_before_the_mismatch(tmp_path: Path) -> None:
+    """#1678: a dry-run state keeps its own refusal, which runs first."""
+    from discord_ferry.errors import StateError
+
+    state = MigrationState(stoat_server_id="SERVER_A", is_dry_run=True)
+    config = _make_config(tmp_path, server_id="SERVER_B")
+    with pytest.raises(StateError, match="from a dry run"):
+        await run_rollback(config, state, exports=[], on_event=lambda _e: None)
+
+
 def test_validate_falls_back_to_config_id(tmp_path: Path) -> None:
     state = MigrationState()  # empty stoat_server_id
     config = _make_config(tmp_path, server_id="srv_from_config")
