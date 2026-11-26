@@ -774,6 +774,20 @@ async def run_migration(
 
     if config.resume or config.incremental:
         export_checkpoint_state = state
+        # Saved progress holds Stoat ids from the server it was made against.
+        # Reusing them against another server deleted that server's default
+        # channel (#1653), so refuse before anything is sent or saved.
+        saved_server = state.stoat_server_id
+        if config.server_id and saved_server and config.server_id != saved_server:
+            raise MigrationError(
+                _safe(
+                    config,
+                    f"The saved progress in {config.output_dir} belongs to Stoat server "
+                    f"'{saved_server}', but --server-id is '{config.server_id}'. Run "
+                    "without --server-id (or with the saved id) to continue that "
+                    "migration, or start a fresh migration in a new output folder.",
+                )
+            )
 
     # Set AFTER the four state paths converge, deliberately, and not inside any
     # of them. --resume loads, --incremental either carries from a prior state or
