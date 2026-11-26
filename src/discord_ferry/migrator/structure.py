@@ -1449,6 +1449,51 @@ async def apply_channel_permissions(
         ) from exc
 
 
+_FORUM_TITLE_MAX = 32  # Stoat's category title cap, the length truncate_name applies
+
+
+def _forum_category_titles(
+    forum_categories: dict[str, str],
+    forum_key_owner: dict[str, str],
+    category_names: dict[str, str],
+    category_map: dict[str, str],
+) -> dict[str, str]:
+    """Display name for each forum category this run touches (#1640).
+
+    A carried key keeps the name it was saved with, so a later run never renames it.
+    A new plain key keeps the forum's name, as before. A new suffixed key (a second
+    forum of the same name) gets "<name> (2)", "(3)" in forum-id order, unique among
+    the saved category names and this run's names, with the name trimmed so the
+    suffix survives the 32-character cap.
+    """
+    taken = {truncate_name(title) for title in category_names.values()}
+    titles: dict[str, str] = {}
+    suffixed: list[str] = []
+    for key, name in forum_categories.items():
+        if category_map.get(key):
+            titles[key] = category_names.get(key, name)
+        elif key == f"forum-{name}":
+            titles[key] = name
+            taken.add(truncate_name(name))
+        else:
+            suffixed.append(key)
+    for key in sorted(
+        suffixed,
+        key=lambda k: (len(forum_key_owner.get(k, "")), forum_key_owner.get(k, ""), k),
+    ):
+        name = forum_categories[key]
+        number = 2
+        while True:
+            suffix = f" ({number})"
+            candidate = truncate_name(name, _FORUM_TITLE_MAX - len(suffix)) + suffix
+            if truncate_name(candidate) not in taken:
+                break
+            number += 1
+        titles[key] = candidate
+        taken.add(truncate_name(candidate))
+    return {key: titles[key] for key in forum_categories}
+
+
 async def run_channels(
     config: FerryConfig,
     state: MigrationState,
@@ -1556,6 +1601,12 @@ async def run_channels(
             )
         )
 
+    # Display names are fixed here so the category, its index channel and the title
+    # in the category PATCH all read the same name (#1640).
+    forum_categories = _forum_category_titles(
+        forum_categories, forum_key_owner, state.category_names, state.category_map
+    )
+
     # Reserve channel slots for forum index channels (one per forum category).
     index_channel_slots = len(forum_categories) if forum_categories else 0
 
@@ -1613,8 +1664,9 @@ async def run_channels(
             is_new_key = not state.category_map.get(forum_key)
             stoat_forum_id = state.category_map.get(forum_key) or _generate_category_id()
             state.category_map[forum_key] = stoat_forum_id
-            state.category_names[forum_key] = forum_name
-            state.forum_category_names[forum_key] = forum_name  # S15: track for REPORT rebuild
+            if is_new_key:
+                state.category_names[forum_key] = forum_name
+                state.forum_category_names[forum_key] = forum_name  # S15: for REPORT rebuild
             owner_id = forum_key_owner.get(forum_key)
             if is_new_key and owner_id is not None:
                 # Same step as the category_map write, before any channel is filed, so a
@@ -1629,8 +1681,9 @@ async def run_channels(
             )
     elif forum_categories and config.dry_run:
         for forum_key, forum_name in forum_categories.items():
+            if not state.category_map.get(forum_key):
+                state.forum_category_names[forum_key] = forum_name  # S15: for REPORT rebuild
             state.category_map[forum_key] = f"dry-cat-{forum_key}"
-            state.forum_category_names[forum_key] = forum_name  # S15: track for REPORT rebuild
 
     if config.dry_run:
         for (

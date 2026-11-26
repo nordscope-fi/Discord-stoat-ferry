@@ -4890,6 +4890,8 @@ async def test_run_channels_separates_two_same_named_forums(
     assert state.channel_categories["222"] == PLAIN_FORUM
     assert state.channel_categories["333"] == SECOND_FORUM
     assert state.forum_key_forums == {PLAIN_FORUM: ["300"], SECOND_FORUM: ["301"]}
+    assert state.category_names == {PLAIN_FORUM: "Ideas & help", SECOND_FORUM: "Ideas & help (2)"}
+    assert state.forum_category_names == state.category_names
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
@@ -5058,6 +5060,73 @@ async def test_run_channels_records_a_second_forum_under_a_merged_key(
         )
     assert state.channel_categories["666"] == PLAIN_FORUM
     assert state.forum_key_forums == {PLAIN_FORUM: ["300", "301", "302"]}
+
+
+def test_forum_category_titles_suffix_only_a_new_key_that_is_not_the_plain_key() -> None:
+    from discord_ferry.migrator.structure import _forum_category_titles
+
+    titles = _forum_category_titles(
+        {PLAIN_FORUM: "Ideas & help", SECOND_FORUM: "Ideas & help", "forum-Solo": "Solo"},
+        {PLAIN_FORUM: "300", SECOND_FORUM: "301", "forum-Solo": "400"},
+        category_names={},
+        category_map={},
+    )
+    assert titles == {
+        PLAIN_FORUM: "Ideas & help",
+        SECOND_FORUM: "Ideas & help (2)",
+        "forum-Solo": "Solo",
+    }
+
+
+def test_forum_category_titles_number_namesakes_in_forum_id_order() -> None:
+    from discord_ferry.migrator.structure import _forum_category_titles
+
+    keys = {"forum-Q": "Q", "forum-Q~302": "Q", "forum-Q~301": "Q"}
+    owners = {"forum-Q": "300", "forum-Q~302": "302", "forum-Q~301": "301"}
+    titles = _forum_category_titles(keys, owners, category_names={}, category_map={})
+    assert titles == {"forum-Q": "Q", "forum-Q~302": "Q (3)", "forum-Q~301": "Q (2)"}
+
+
+def test_forum_category_titles_skip_a_suffix_another_category_already_uses() -> None:
+    from discord_ferry.migrator.structure import _forum_category_titles
+
+    titles = _forum_category_titles(
+        {SECOND_FORUM: "Ideas & help"},
+        {SECOND_FORUM: "301"},
+        category_names={"12": "Ideas & help (2)"},
+        category_map={"12": "stoat-x"},
+    )
+    assert titles == {SECOND_FORUM: "Ideas & help (3)"}
+
+
+def test_forum_category_titles_never_rename_a_carried_key() -> None:
+    from discord_ferry.migrator.structure import _forum_category_titles
+
+    titles = _forum_category_titles(
+        {SECOND_FORUM: "Ideas & help"},
+        {SECOND_FORUM: "301"},
+        category_names={SECOND_FORUM: "Kept name"},
+        category_map={SECOND_FORUM: "stoat-x"},
+    )
+    assert titles == {SECOND_FORUM: "Kept name"}
+
+
+def test_forum_category_titles_stay_within_32_characters() -> None:
+    """SC-1.7: the suffix is kept and the name is trimmed, measured with truncate_name."""
+    from discord_ferry.migrator.sanitize import truncate_name
+    from discord_ferry.migrator.structure import _forum_category_titles
+
+    name = "N" * 32
+    titles = _forum_category_titles(
+        {"forum-" + name: name, "forum-" + name + "~301": name},
+        {"forum-" + name: "300", "forum-" + name + "~301": "301"},
+        category_names={},
+        category_map={},
+    )
+    second = titles["forum-" + name + "~301"]
+    assert second == "N" * 28 + " (2)"
+    assert len(second) == 32 and truncate_name(second) == second
+    assert titles["forum-" + name] == name
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
