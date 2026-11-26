@@ -44,6 +44,45 @@ def _write_plain_english_fixture(fake_bin: Path) -> Path:
     return command
 
 
+def _without_git_location(base: dict[str, str]) -> dict[str, str]:
+    """Drop every GIT_ variable so git cannot be pointed at the caller's repository (#1639)."""
+    return {key: value for key, value in base.items() if not key.startswith("GIT_")}
+
+
+def _core_bare(git_dir: Path) -> str:
+    result = subprocess.run(
+        ["git", f"--git-dir={git_dir}", "config", "--get", "core.bare"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_without_git_location(dict(os.environ)),
+    )
+    return result.stdout.strip()
+
+
+def test_installer_checkout_ignores_the_callers_git_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    subprocess.run(
+        ["git", "init", "-q", str(victim)],
+        check=True,
+        env=_without_git_location(dict(os.environ)),
+    )
+    assert _core_bare(victim / ".git") == "false"
+    monkeypatch.setenv("GIT_DIR", str(victim / ".git"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(victim / ".git"))
+
+    case = tmp_path / "case"
+    case.mkdir()
+    root, _home, env = _installer_checkout(case)
+
+    assert _core_bare(victim / ".git") == "false"
+    assert (root / ".git").is_dir()
+    assert not [key for key in env if key.startswith("GIT_")]
+
+
 def _installer_checkout(
     tmp_path: Path, *, version: str = "1.7.0", command: bool = True
 ) -> tuple[Path, Path, dict[str, str]]:
@@ -55,7 +94,9 @@ def _installer_checkout(
     fake_bin.mkdir()
     assert NODE is not None
     (fake_bin / "node").symlink_to(NODE)
-    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(
+        ["git", "init", "-q", str(root)], check=True, env=_without_git_location(dict(os.environ))
+    )
     shutil.copytree(REPO / "config/agent-compat", root / "config/agent-compat")
     shutil.copytree(REPO / "scripts/agent-compat", root / "scripts/agent-compat")
     fixture_skill = root / ".claude/skills/fixture-skill/SKILL.md"
@@ -116,7 +157,7 @@ def _installer_checkout(
     if command:
         _write_plain_english_fixture(fake_bin)
     env = {
-        **os.environ,
+        **_without_git_location(dict(os.environ)),
         "HOME": str(user_home),
         "CODEX_HOME": str(user_home / ".codex"),
         "PATH": f"{fake_bin}:/usr/bin:/bin",
