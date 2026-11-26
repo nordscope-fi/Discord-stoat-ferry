@@ -73,8 +73,8 @@ with a regex on the filename.
     thread archive, it sanitises the parent and thread names. Archive mode makes no API calls and
     posts nothing to Stoat. It writes each file to
     `{output_dir}/threads/{parent_channel_name}/{thread_name}.md`.
-    `sanitize_filename()` strips characters that are illegal on Windows (`< > : " \ | ? *`). It
-    replaces `/` with `-` so a name like `wip/2026` never creates a subdirectory, and rewrites
+    `sanitize_filename()` (in `migrator/sanitize.py`) replaces characters that are illegal on Windows
+    (`< > : " \ | ? *`) and `/` with `_`, so a name like `wip/2026` never creates a subdirectory, and rewrites
     Win32 reserved device names (`CON`, `NUL`, etc.). During one run, colliding thread names in one
     parent folder receive numeric suffixes such as `_2` and `_3`. This does not affect DCE's own
     output filenames, DCE writes those before Ferry sees them.

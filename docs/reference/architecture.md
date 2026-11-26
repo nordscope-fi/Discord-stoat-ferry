@@ -71,11 +71,11 @@ src/discord_ferry/
 ├── reporter.py              # Post-migration report generator
 ├── review.py                # Pre-creation review summary builder
 ├── blueprint.py             # Server blueprint export/import
-├── gui.py                   # NiceGUI web interface (4-screen workflow)
-├── cli.py                   # Click CLI (migrate, validate, build, export-blueprint, rollback, stats, check, repair, retry, probe, tls-check)
+├── gui.py                   # NiceGUI web interface (5-step workflow)
+├── cli.py                   # Click CLI (migrate, validate, build, export-blueprint, rollback, stats, check, repair, backfill-roles, retry, refresh-permissions, probe, tls-check, feedback)
 │
 ├── core/
-│   ├── engine.py            # Migration orchestrator, runs all 13 phases
+│   ├── engine.py            # Migration orchestrator, runs the 13 listed phases plus an optional validate step
 │   ├── events.py            # MigrationEvent dataclass and EventCallback type
 │   └── security.py          # SecureTokenStore, token masking and sanitization at output boundaries
 │
@@ -183,6 +183,7 @@ class FerryConfig:
     validate_after: bool  # Run post-migration validation phase (default False)
     max_concurrent_requests: int  # asyncio.Semaphore bound for API requests (default 5, min 1)
     max_concurrent_channels: int  # Parallel channel workers in MESSAGES (default 3)
+    dce_parallel: int  # Channels DCE exports in parallel before migration (default 1)
     thread_strategy: str  # "flatten" (default), "merge", or "archive"
     incremental: bool  # Delta migration (default False; mutually exclusive with resume)
     force: bool  # Override DCE freshness warning (>30 days old) and soft errors
@@ -228,7 +229,7 @@ class MigrationState:
     emoji_map: dict[str, str]
 
     # Upload caches (avoid re-uploading identical files)
-    avatar_cache: dict[str, str]  # User ID → Autumn avatar file ID
+    avatar_cache: dict[str, str]  # User ID → Autumn avatar file ID (not a CDN URL)
     upload_cache: dict[str, str]  # "<tag>:<local file path>" → Autumn file ID
 
     # Author context (for mention remapping in transforms)
@@ -278,6 +279,8 @@ class MigrationState:
         str, list[str]
     ]  # forum_cat_key → Discord channel IDs of the forum's members
     forum_category_names: dict[str, str]  # forum_cat_key → category name on Stoat
+    # Forum keys whose index exists but whose message id was lost
+    forum_index_present_unknown_id: set[str]
 
     # Resume tracking
     current_phase: str  # Phase name for resume skip logic
@@ -291,6 +294,23 @@ class MigrationState:
     thread_strategy: (
         str  # The strategy the migration ran under (recorded from 2.17.0 for ferry check)
     )
+    thread_parent_ids: dict[str, str]  # Discord thread ID → Discord parent channel ID
+    # Channels Stoat created with the server, saved before Ferry deletes them
+    default_channel_ids: list[str]
+    # Accepted staged DCE input evidence (relative to output dir)
+    staged_input: StagedInputWitness | None
+
+    # Emoji tracking
+    created_emoji_names: dict[str, str]  # Discord emoji ID → name the server stored
+    # Repair resume record: {"old": id, "new": id}
+    pending_emoji_rewrites: dict[str, dict[str, str]]
+
+    # Delivery ledger (structural identity and bookkeeping for message delivery)
+    delivery_namespace: str
+    delivery_service_digest: str
+    delivery_bookkeeping: dict[str, str]
+    pending_delivery_replacements: dict[str, str]
+    # delivery_ready and permission_runtime are runtime-only and never restored from JSON
 
     # Counters
     attachments_uploaded: int
@@ -311,6 +331,8 @@ class MigrationState:
     prior_messages_total: int  # Total messages in prior (resumed) state
     embeds_total: int
     embeds_dropped: int  # Embeds dropped when validate_sum would exceed the 2000-char body ceiling
+    # Merge-strategy messages skipped because the parent already had them
+    merge_duplicates_suppressed: int
     native_fidelity_counts: dict[
         str, int
     ]  # Per-strategy native reaction sends, for fidelity scoring
@@ -396,8 +418,9 @@ Voice channels retain a positive `user_limit` in blueprint JSON. Missing or zero
 
 ### Phase Execution
 
-The engine runs 13 phases in strict order (0 through 12, with an additional 7.5 for AVATARS).
-Each phase depends on ID mappings and state produced by earlier phases.
+The engine runs the 13 phases listed in `PHASE_ORDER` in strict order (0 through 11, with an
+additional 7.5 for AVATARS). When `--validate-after` is set, a 14th step, VALIDATE MIGRATION, runs
+after REPORT. Each phase depends on ID mappings and state produced by earlier phases.
 
 ```
 EXPORT → VALIDATE → CONNECT → SERVER → ROLES → CATEGORIES → CHANNELS
@@ -410,17 +433,17 @@ EXPORT → VALIDATE → CONNECT → SERVER → ROLES → CATEGORIES → CHANNELS
 | 0 | **EXPORT** | `exporter/` | Discord API | DCE JSON files | Discord API |
 | 1 | **VALIDATE** | `parser/` | DCE JSON files | warnings, author_names | None |
 | 2 | **CONNECT** | `migrator/connect.py` | config | autumn_url, stoat_server_id | `GET /` + `GET /users/@me` |
-| 3 | **SERVER** | `migrator/structure.py` | exports[0].guild | stoat_server_id | `POST /servers`, Autumn upload |
+| 3 | **SERVER** | `migrator/structure.py` | exports[0].guild | stoat_server_id | `POST /servers/create`, Autumn upload |
 | 4 | **ROLES** | `migrator/structure.py` | exports, discord_metadata | role_map | `POST /servers/:id/roles`, permission PUTs |
 | 5 | **CATEGORIES** | `migrator/structure.py` | exports | category_map | `PATCH /servers/:id` |
 | 6 | **CHANNELS** | `migrator/structure.py` | exports, discord_metadata | channel_map | `POST /servers/:id/channels`, permission PUTs |
-| 7 | **EMOJI** | `migrator/emoji.py` | message content + reactions | emoji_map | Autumn upload + `PUT /servers/:id/emoji/:id` |
+| 7 | **EMOJI** | `migrator/emoji.py` | message content + reactions | emoji_map | Autumn upload + `PUT /custom/emoji/:id` |
 | 7.5 | **AVATARS** | `migrator/avatars.py` | all exports (unique authors) | avatar_cache | Autumn upload |
 | 8 | **MESSAGES** | `migrator/messages.py` | all messages | message_map, pending_pins/reactions | `POST /channels/:id/messages`, Autumn uploads |
 | 9 | **REACTIONS** | `migrator/reactions.py` | pending_reactions | reactions_applied | `PUT /channels/:id/messages/:id/reactions` |
 | 10 | **PINS** | `migrator/pins.py` | pending_pins | pins_applied | `PUT /channels/:id/messages/:id/pin` |
 | 11 | **REPORT** | `reporter.py` | state | migration_report.json | None |
-| 12 | **VALIDATE MIGRATION** | inline in `engine.py` | state, config | validation_results | `GET /servers/:id` |
+| 12 | **VALIDATE MIGRATION** | inline in `engine.py` | state, config | validation_results | The same read-only lookups as `ferry check` |
 
 ### Phase Skip Logic
 
@@ -454,7 +477,7 @@ Collects `author_names` in a single pass to avoid re-scanning later.
 `features.autumn.url` field. `GET /users/@me` to validate the token. If `config.server_id` is
 set, verifies the server is accessible (best-effort, non-fatal on failure).
 
-**SERVER** (Phase 3): Creates a new server via `POST /servers` (or verifies the existing one).
+**SERVER** (Phase 3): Creates a new server via `POST /servers/create` (or verifies the existing one).
 Uploads the guild icon to Autumn and applies it. Versions before 2.41.6 also set the server
 default permissions to `FERRY_MIN_PERMISSIONS` (1,022,361,624); that write was removed because
 Stoat seeds every member's effective permissions from the server default (#957). The Ferry
@@ -489,8 +512,8 @@ Populates `state.channel_map`.
 
 **EMOJI** (Phase 7): Scans all messages (via streaming if `metadata_only`) for custom emoji in
 content (`<:name:ID>`) and reactions. Deduplicates by ID. Downloads each emoji image, uploads
-to Autumn with tag `emojis`, creates on server. 2.0s delay between creates (shares the 5/10s
-`/servers` rate bucket). Populates `state.emoji_map`.
+to Autumn with tag `emojis`, creates on server. 0.5s delay between creates (`_CREATION_DELAY` in
+`migrator/emoji.py`). Populates `state.emoji_map`.
 
 **AVATARS** (Phase 7.5): Pre-flight avatar download and upload. `run_avatars()` in
 `migrator/avatars.py` scans all exports for unique authors and downloads each author's avatar.
@@ -649,17 +672,9 @@ appends `-1`, `-2` suffixes (eating into the 32-char budget as needed).
 
 ### Rate Limit Buckets
 
-Stoat uses **fixed 10-second windows** (not sliding).
-
-| Bucket | Limit | Shared across |
-|--------|-------|---------------|
-| `/servers` | **5 per 10s** | Server create, channel create, role create, emoji create, category edit |
-| Messages | **10 per 10s** | `POST /channels/:id/messages` only |
-| Catch-all | **20 per 10s** | Everything else, including Autumn uploads |
-
-!!! warning "The /servers bucket is shared"
-    Creating a channel, a role, and an emoji in quick succession all draw from the same
-    5-per-10-second budget. Ferry paces structure creation phases to stay within this limit.
+Stoat uses **fixed 10-second windows** (not sliding). The buckets, their limits and what each one
+is keyed by (several are per channel, not shared) are listed once, in
+[Stoat API Notes](stoat-api-notes.md#rate-limits). This page does not copy that table.
 
 **Response headers**: Stoat sets `X-RateLimit-Limit`, `X-RateLimit-Remaining`,
 `X-RateLimit-Reset-After` and `X-RateLimit-Bucket` on **every** response, and exposes them through
@@ -667,9 +682,9 @@ CORS. `X-RateLimit-Reset-After` is in **milliseconds**, unlike Discord's identic
 See [Stoat API Notes](stoat-api-notes.md#rate-limits).
 
 **429 response body**: `{ "retry_after": 4200 }`, Ferry sleeps for this duration (milliseconds)
-and retries. In addition, Ferry's adaptive 429-frequency optimizer tracks 429 frequency in a
-rolling 60-second window and auto-adjusts a delay multiplier (1.5× increase on burst, 0.75×
-decay when clear).
+and retries. Ferry also keeps an adaptive 429-frequency optimizer as a fallback beside the header pacer
+(see Rate Limiting Strategy). It tracks 429 frequency in a rolling 60-second window and
+auto-adjusts a delay multiplier (1.5× increase on burst, 0.75× decay when clear).
 
 ### Retry Logic
 
@@ -847,6 +862,7 @@ Local file → validate size → POST multipart to {autumn_url}/{tag} → file I
 | `attachments` | 20 MB | Message attachments |
 | `avatars` | 4 MB | User/masquerade avatars |
 | `icons` | 2.5 MB | Server icon, role icon |
+| `backgrounds` | 6 MB | Listed in Ferry's size limits; no migration phase uploads to it |
 | `banners` | 6 MB | Server banner |
 | `emojis` | 500 KB | Custom emoji |
 
@@ -1090,17 +1106,21 @@ Two `asyncio.Event` objects on `FerryConfig` control flow:
 
 ### Rate Limiting Strategy
 
-Three layers:
+Five layers work together:
 
 1. **HTTP-level retry**: `_api_request()` handles 429 responses by sleeping for the
    server-specified `retry_after` duration, then retrying (up to 3 times)
-2. **Adaptive 429-frequency optimizer**: A rolling 60-second window tracks 429 frequency.
-   On a 429 burst the delay multiplier increases by 1.5×; when the window is clear it decays
-   by 0.75×. This compensates for the absence of `X-RateLimit-*` response headers.
-3. **Phase-level pacing**: Structure creation phases (ROLES, CATEGORIES, CHANNELS, EMOJI) add
-   explicit `asyncio.sleep()` between API calls to stay within the 5/10s `/servers` bucket
-4. **User-configurable delay**: `config.message_rate_limit` (default 1.0s) adds a sleep between
-   each message send as a safety margin above the 10/10s message bucket
+2. **Header pacer**: Stoat sends `X-RateLimit-*` headers on every response. Ferry keeps a count
+   per bucket from those headers and waits before a bucket runs out, so most requests never
+   see a 429
+3. **Adaptive 429-frequency optimizer**: A fallback beside the pacer. A rolling 60-second
+   window tracks 429 frequency. On a 429 burst the delay multiplier increases by 1.5×; when the
+   window is clear it decays by 0.75×
+4. **Phase-level pacing**: Structure creation phases (ROLES, CATEGORIES, CHANNELS, EMOJI) add
+   explicit `asyncio.sleep()` between API calls (EMOJI uses 0.5s) to stay inside the buckets in
+   [Stoat API Notes](stoat-api-notes.md#rate-limits)
+5. **User-configurable delay**: `config.message_rate_limit` (default 1.0s) adds a sleep between
+   each message send as a safety margin above the messaging bucket
 
 ---
 
@@ -1111,14 +1131,20 @@ Three layers:
 ```
 FerryError (base)
 ├── ValidationError            # Export validation failed (red status)
+├── BlueprintValidationError   # Invalid blueprint cap or selected metadata (also a ValueError)
+├── CheckError                 # A recorded migration cannot be checked (dry-run state, or no server recorded)
 ├── StoatConnectionError       # API unreachable or token invalid
 ├── AutumnUploadError          # File upload to Autumn failed
-├── MigrationError             # Generic phase failure
 ├── StateError                 # state.json read/write problem
-└── ExportError (→ MigrationError)
-    ├── DCENotFoundError       # DCE binary not available
-    ├── DotNetMissingError     # Legacy import-compatible type; current export path does not raise it
-    └── DiscordAuthError       # Discord token invalid or expired
+└── MigrationError             # Generic phase failure
+    ├── PermissionSafetyError  # Permission safety stop, carries a permission outcome
+    ├── DuplicateSendError     # Stoat rejected a send because its Idempotency-Key was still cached
+    ├── MessageSendFailure     # Safe transport detail for a failed send (confirmed_rejected or uncertain)
+    ├── DeliveryUnresolvedError  # An uncertain delivery is preserved, not replayed
+    └── ExportError
+        ├── DCENotFoundError   # DCE binary not available
+        ├── DotNetMissingError # Legacy import-compatible type; current export path does not raise it
+        └── DiscordAuthError   # Discord token invalid or expired
 ```
 
 ### Phase-Level Error Handling
@@ -1152,15 +1178,21 @@ reporting.
 it in native mode (pywebview window) if available, otherwise opens the default browser to
 `http://localhost:8765`.
 
-**4-Screen Workflow**:
+**5-Step Workflow**:
 
-1. **Setup**: Credential inputs, mode toggle (1-Click vs Offline), advanced options (rate limit,
+1. **Configure**: Credential inputs, mode toggle (1-Click vs Offline), advanced options (rate limit,
    skip flags, dry run, server ID). All fields persist to `app.storage.user`.
 2. **Export** (1-Click only): DCE download progress, per-channel export progress, cached export
    detection with Use Cached / Re-export choice.
 3. **Validate**: Export summary table, warnings list, ETA estimate, green/amber/red status.
-4. **Migrate**: Phase indicator chips, per-channel progress bar, running totals (messages,
-   attachments, errors), scrolling log, pause/resume button, cancel button with confirmation.
+4. **Migrate**: First a review dialog summarises what will be created; **Proceed** starts the
+   migration and **Cancel** returns to Validate. Then phase indicator chips, per-channel progress bar, running totals (verified,
+   partial, unresolved, failed records, errors, warnings, ETA), scrolling log, pause/resume
+   button, cancel button with confirmation.
+5. **Done**: A completion card offers the report, rollback, **Verify** and **Repair**.
+
+The GUI also serves tool pages under `/tools` (check, repair, retry, probe, blueprint export,
+build, validate, stats, TLS check). See the [GUI walkthrough](../guides/gui-walkthrough.md#tools).
 
 **Event subscription**: Passes a callback to `run_migration()` that updates NiceGUI elements.
 Uses `ui.timer` for async event loop integration.
@@ -1186,9 +1218,12 @@ It cleans temporary records without deleting unrelated settings.
 | `ferry stats` | Print a Rich-table summary of a completed run (read-only, zero network calls) |
 | `ferry check` | Ask the live Stoat server whether every entity Ferry recorded is still there |
 | `ferry repair` | Re-send messages and re-create structural entities that `ferry check` reported as failed |
+| `ferry backfill-roles` | Re-apply Discord role ordering to a server migrated before the #380 fix |
 | `ferry retry` | Re-send the messages parked in the dead-letter queue after a failed send |
+| `ferry refresh-permissions` | Refresh only the source permission metadata in an output directory; no Stoat requests |
 | `ferry probe` | Diagnose a live Stoat instance (upload limits, voice, webhooks, rate-limit shape) |
 | `ferry tls-check` | Report the CA bundle and proxy resolution Ferry is using for outbound HTTPS |
+| `ferry feedback` | Share a bug, idea or general comment, after reviewing the public report |
 
 **Event subscription**: `_ProgressTracker` class wraps Rich's `Live` display with a progress
 bar, status table, and warning/error output. Subscribes to the same `on_event` callback as
@@ -1235,7 +1270,15 @@ command-line archive automatically.
 Runs DCE as an async subprocess with progress parsing:
 
 ```python
-async def run_dce_export(config, on_event) -> None
+async def run_dce_export(
+    config: FerryConfig,
+    dce_path: Path,
+    on_event: EventCallback,
+    *,
+    reuse_media: bool = False,
+    request: ExportRequest | None = None,
+    reuse_media_reason: str = "no previous completed export is recorded for this folder",
+) -> Path
 ```
 
 - Launches `DiscordChatExporter.Cli exportguild` with the required flags
@@ -1389,10 +1432,10 @@ the threshold, useful for suppressing near-empty auto-created threads.
 
 **Filename sanitisation (from v2.19.12, PR #443).** The `archive` strategy derives its local parent
 folder and markdown filename from free-form Discord parent-channel and thread names.
-`sanitize_filename()` in `migrator/messages.py` strips characters that are illegal on Windows
-(`< > : " \ | ? *`). It collapses forward slashes so a thread called `wip/2026` does not create a
-subdirectory, and rewrites Win32 reserved device names (`CON`, `NUL`, etc.). During one run,
-threads whose sanitised names collide within a parent folder receive numeric suffixes such as
+`sanitize_filename()` in `migrator/sanitize.py` replaces characters that are illegal on Windows
+(`< > : " \ | ? *`), control characters and forward slashes with `_`, so a thread called
+`wip/2026` does not create a subdirectory. It also rewrites Win32 reserved device names
+(`CON`, `NUL`, etc.). During one run, threads whose sanitised names collide within a parent folder receive numeric suffixes such as
 `_2` and `_3`.
 
 ---
@@ -1422,10 +1465,10 @@ categories:
 | Category | Weight | What is measured |
 |----------|--------|-----------------|
 | Messages | 40% | Messages sent vs. total, failed message rate |
-| Attachments | 20% | Attachments uploaded vs. total |
+| Attachments | 25% | Attachments uploaded vs. total |
 | Embeds | 15% | Embeds sent vs. dropped |
-| Reactions | 15% | Reactions applied (native mode only) |
 | Replies | 10% | Reply links resolved vs. total replies |
+| Reactions | 10% | Reactions applied (native mode only) |
 
 The score is written to `migration_report.json` under `fidelity_score`.
 

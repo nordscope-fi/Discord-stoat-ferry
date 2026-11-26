@@ -14,7 +14,7 @@ Ferry's command-line interface provides the same migration capability as the GUI
 
 ## Commands
 
-Ferry has thirteen top-level commands: `migrate`, `validate`, `build`, `export-blueprint`, `rollback`, `stats`, `check`, `repair`, `backfill-roles`, `retry`, `refresh-permissions`, `probe`, and `tls-check`.
+Ferry has fourteen top-level commands: `migrate`, `validate`, `build`, `export-blueprint`, `rollback`, `stats`, `check`, `repair`, `backfill-roles`, `retry`, `refresh-permissions`, `probe`, `tls-check`, and `feedback`.
 
 ---
 
@@ -126,7 +126,7 @@ does not move, replace, or delete those files.
 | `--max-concurrent-channels INT` | | 3 | Channels migrated in parallel. Raise only on self-hosted instances. |
 | `--max-concurrent-requests INT` | | 5 | Concurrent API calls across all channel workers. Raise only on self-hosted instances. |
 | `--skip-avatars` | | false | Skip the avatar pre-flight phase; avatars still upload on demand during messages |
-| `--validate-after` | | false | After migration, fetch the server and compare channel/role counts against expectations (results in `state.json` and the run log) |
+| `--validate-after` | | false | After migration, verify every channel, role, category and emoji by ID (same as `ferry check`; results in `state.json`) |
 | `--cleanup-orphans` | | false | Detect and report unreferenced Autumn uploads after migration (report-only; no files are deleted) |
 | `--force-unlock` | | false | Override a stale migration lock on the target Stoat server, or continue without a lock when Ferry cannot take one (it records a warning) |
 | `--skip-dce-verify` | | false | Skip SHA-256 verification of DCE binary downloads (for self-built binaries) |
@@ -544,6 +544,7 @@ ferry repair <output-dir> --export-dir <export-dir> [OPTIONS]
 | `--stoat-url URL` | Stoat API base URL. Or set `STOAT_URL` |
 | `--token TOKEN` | Stoat user token. Prefer the `STOAT_TOKEN` environment variable |
 | `--dry-run` | Report what would be repaired, and change nothing |
+| `--json` | Emit machine-readable JSON |
 
 The export is required because the content lives there and not in the state file. Point repair at
 the same export the migration used: a narrower one leaves repair unable to type a recreated channel
@@ -777,7 +778,7 @@ A block of `key: value` lines. The trust keys are always present; the proxy keys
 | `ca-visible` | Number of CA certificates the standard context reports. `unavailable` is expected for a native macOS context. |
 | `proxy-http` | The `HTTP_PROXY` value Ferry resolved for plain-HTTP requests (credentials redacted), or `none` |
 | `proxy-https` | The `HTTPS_PROXY` value Ferry resolved for HTTPS requests (credentials redacted), or `none` |
-| `proxy-source` | Where the proxy came from: `env`, `system`, or `none` |
+| `proxy-source` | Where the proxy came from: `env` (a proxy environment variable), `os` (the operating system's proxy setting), or `none`. `unreadable` appears if the proxy settings could not be read |
 | `proxy-disabled` | `true` when `FERRY_DISABLE_PROXY` is set and Ferry is ignoring any configured proxy |
 
 **Example output:**
@@ -809,3 +810,15 @@ ferry tls-check
 ```
 
 Run this first when a migration fails with a certificate error, before changing proxy or antivirus settings. On macOS, `native-unavailable-*` means native initialization failed and Ferry retained strict file-based verification.
+
+---
+
+## `ferry feedback`
+
+Send a bug report, an idea, or general feedback from the terminal. Ferry shows the full public report first and sends nothing until you confirm.
+
+```
+ferry feedback
+```
+
+No options or flags. Reports can be anonymous, and what you send becomes public on GitHub. See [Share feedback without leaving Ferry](feedback.md) for the three report types and what Ferry shares and retains.

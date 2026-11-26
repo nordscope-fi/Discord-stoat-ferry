@@ -5,7 +5,7 @@ Every migration involves trade-offs. Discord and Stoat are different platforms w
 !!! warning "Already migrated with an older version?"
     Everything on this page is a deliberate limitation. Ferry also had five **bugs** that lost
     content without any warning, fixed between v2.8.2 and v2.10.0 (missing forwarded messages, missing
-    attachments, and voice channels nobody could use. If you migrated before v2.10.0, see
+    attachments, and voice channels nobody could use). If you migrated before v2.10.0, see
     [Was my earlier migration affected?](earlier-migrations.md).
 
 ---
@@ -18,13 +18,12 @@ Flattened announcement and public threads migrate only when Ferry verifies their
 parent access, inherited age restriction, active unlocked lifecycle, and representable send access.
 Private threads, member-specific access, incomplete evidence, and unequal thread-send access stop
 before a destination write. Merge, archive, and `--skip-threads` retain their existing behavior.
-Filename inference cannot prove a thread parent. Normal forum routing is tracked in
-[#1217](https://github.com/nordscope-fi/Discord-stoat-ferry/issues/1217), not implemented in this release.
+Filename inference cannot prove a thread parent.
 
 | Discord Feature | What Stoat Gets | Workaround |
 |-----------------|----------------|------------|
 | Threads | Eligible public and announcement threads are flattened to text channels by default, prefixed with parent channel name (e.g. `general-my-thread`). Private or unproved threads stop before a destination effect. | Use `--thread-strategy merge` to append eligible thread messages into the parent channel. Use `--thread-strategy archive` to write local markdown files under `<output directory>/threads/<parent channel>/<thread>.md`; archive mode posts nothing to Stoat. Use `--skip-threads` to exclude threads. |
-| Forum posts | Normal DCE exports do not produce a supported generated forum index. Thread access must not be assumed to match its parent. | Exclude unprovable threads with `--skip-threads`; see #1217 above. |
+| Forum posts | Forum posts arrive in DiscordChatExporter exports as ordinary threads. When Ferry has Discord metadata for the export, it reads the parent channel's type from Discord and recognises the post as a forum post. It then gets its forum category, an index channel for the forum, and a "Forum post" header in place of the usual thread header. Thread access must not be assumed to match its parent. | Exclude threads with `--skip-threads` if you do not want forum posts migrated. |
 | Stage Channels | Created as Stoat voice channels, with the same limits as any voice channel (see Voice channels below). Stage-only features such as speaker requests have no Stoat equivalent. | None |
 | Scheduled Events | Not migrated | None |
 | Channel ordering | Categories follow the original Discord order (since v2.3.0, requires a Discord token), but channels *inside* a category may appear in a different order | Manually reorder channels within categories in Stoat after migration |
@@ -41,12 +40,12 @@ These limitations affect how individual messages and their content appear after 
 
 | Discord Feature | What Stoat Gets | Workaround |
 |-----------------|----------------|------------|
-| Embeds | Flattened to markdown text; inline fields use `\|` separators. A usable local embedded video is uploaded first, then a local thumbnail or image. | Ferry does not fetch remote media, transcode video, or promise that a client can play it. Stoat embeds have a different structure and cannot replicate Discord embeds exactly. |
+| Embeds | Sent as Stoat embed objects. Title, description, link, colour and media carry over; author, fields and footer are flattened into the description, with inline fields separated by `\|`. A usable local embedded video is uploaded first, then a local thumbnail or image. | Ferry does not fetch remote media, transcode video, or promise that a client can play it. Stoat embeds have a different structure and cannot replicate Discord embeds exactly. |
 | Polls | Active polls are unavailable because DCE 2.48 does not export them. Closed-poll notifications keep the fallback text and embeds that DCE writes. | Keep a separate record of active poll choices and results before migration if they matter. Stoat has no native poll endpoint used by Ferry. |
 | Application command interactions | Ferry adds the command name and invoking user's display name above the message. Interaction IDs and the user's other profile fields are not sent. | None. Stoat has no matching command-interaction object. |
 | Stickers | Uploaded as image attachments where the source file is available; Lottie (animated) stickers receive a text fallback | None; Lottie format is not supported by Stoat |
 | Reactions | Text summary appended to the message by default. Shows emoji and count. Custom emoji migrated in the Emoji phase render inline using the Stoat emoji syntax (`<:id:>`), so they appear as the actual image; custom emoji that were **not** migrated fall back to `[:name:]` as plain text. Unicode emoji pass through unchanged. Stoat allows at most 20 reactions per message; anything beyond that is dropped and counted in the migration report. | Use `--reaction-mode native` (or the GUI's Reaction mode dropdown) for per-emoji reactions added via the API; slower, still capped at 20 per message, and native mode appends `[Original counts: ...]` when Stoat's cap truncates so nothing is silently lost |
-| Embeds on very long messages | Stoat rejects a message whose combined content + embeds exceed a 2,000-character body ceiling. Ferry walks embeds in order and drops any that would push the total past 2,000, appending a compact `[Embed dropped: <title>]` note to the message body and incrementing `embeds_dropped` in the state file and migration report. Trailing embeds are the ones lost. | Split the source message manually before exporting, or accept the drop; the note in the migrated message flags exactly what went and where |
+| Embeds on very long messages | Stoat rejects a message whose combined content + embeds exceed a 2,000-character body ceiling. Ferry walks embeds in order and drops any that would push the total past the budget, appending a compact `[N embed(s) could not be migrated]` note to the message body and incrementing `embeds_dropped` in the state file and migration report. Trailing embeds are the ones lost. | Split the source message manually before exporting, or accept the drop; the note in the migrated message flags exactly what went and where |
 | Forwarded messages | Content, attachments, embeds and stickers are migrated, marked `[forwarded]`. They post under the name of whoever **forwarded** them, not the original author. | None for attribution; DiscordChatExporter's forwarded block carries no author field, so the original writer is not in the export at all. Exports made with DCE older than 2.47 have no forwarded content to recover and are still skipped with a warning; re-export to recover them. |
 | Long messages (>2000 chars) | Split into sequential parts with `[continued K/N]` markers (e.g. `[continued 2/3]`). Original content is fully preserved across parts. | None needed; splitting is automatic and lossless |
 | Author names >32 chars | Truncated to 29 chars with a `#XXXX` discriminator suffix derived from the author's Discord ID. Ensures uniqueness while fitting the Stoat masquerade name limit. | None; the suffix preserves attributability even after truncation |
@@ -96,11 +95,7 @@ These limitations affect use cases involving large servers or non-standard expor
 | GDPR export incompatibility | Ferry is designed for server migrations using DiscordChatExporter guild exports. GDPR personal data packages have a different structure and are not supported. | Use `DiscordChatExporter.Cli exportguild` instead of GDPR downloads |
 | 1M+ message RAM usage | The in-memory `message_map` dict requires approximately 200 MB of RAM for servers with 1 million messages. This is held for the duration of the migration. | Split very large servers into batches, or use the `--incremental` flag to migrate in stages |
 | Export file size cap | Ferry refuses a single DiscordChatExporter JSON file larger than 4 GiB, or nested too deeply, instead of loading it. That is roughly 3 million messages in one channel. The migration stops with an error naming the file and the limit, so no channel is left out without notice. | None yet. A channel that large cannot be migrated |
-| Rate-limit headers | Stoat sends `X-RateLimit-Limit`, `X-RateLimit-Bucket`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset-After`. The reset value is in milliseconds. | Ferry uses its configured pacing and responds to 429 errors. |
-
-Stoat v0.15.7 sets `X-RateLimit-Limit`, `X-RateLimit-Bucket`,
-`X-RateLimit-Remaining`, and `X-RateLimit-Reset-After` with
-[`response.set_raw_header`](https://github.com/revoltchat/backend/blob/5fb97ec4e7fd2f37fab38c834d3c354914ef4589/crates/core/ratelimits/src/rocket.rs#L99-L112).
+| Rate-limit headers | Stoat v0.15.7 sends `X-RateLimit-Limit`, `X-RateLimit-Bucket`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset-After` (set with [`response.set_raw_header`](https://github.com/revoltchat/backend/blob/5fb97ec4e7fd2f37fab38c834d3c354914ef4589/crates/core/ratelimits/src/rocket.rs#L99-L112)). The reset value is in milliseconds. | Ferry uses its configured pacing and responds to 429 errors. |
 
 ---
 

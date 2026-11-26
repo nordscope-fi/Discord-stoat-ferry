@@ -51,9 +51,9 @@ On a 429 response the body also contains:
 
 Ferry's API client (`migrator/api.py`) sleeps for the `retry_after` value (milliseconds) and
 retries. In addition, Ferry runs an **adaptive 429-frequency optimizer**: a rolling 60-second
-window tracks 429 frequency and automatically adjusts a delay multiplier — increasing by 1.5× on
-a burst, decaying by 0.75× when the window is clear. This reduces sustained 429s without relying
-on headers. Ferry also adds a configurable inter-message delay (default 1.0 s) as a fixed safety
+window tracks 429 frequency and automatically adjusts a delay multiplier, increasing by 1.5× on
+a burst and decaying by 0.75× when the window is clear. It is a fallback beside Ferry's
+header-driven pacer, which waits before a bucket runs out. Together they reduce sustained 429s. Ferry also adds a configurable inter-message delay (default 1.0 s) as a fixed safety
 margin.
 
 ---
@@ -80,7 +80,7 @@ unhealthy.
 
 ### 429 Handling
 
-429 (Too Many Requests) responses are handled separately — the client sleeps for the
+429 (Too Many Requests) responses are handled separately: the client sleeps for the
 server-provided `retry_after` value and retries. **429 responses do NOT count toward
 the circuit breaker threshold**, since they indicate normal rate limiting rather than
 server-side failure.
@@ -108,7 +108,7 @@ a color or permission name.
 
 ---
 
-## Categories — PATCH Server Object
+## Categories: PATCH Server Object
 
 Categories in Stoat live on the **Server object**, not on channels. A channel has no `category_id`
 field. Categories are managed by PATCHing the server's `categories` array
@@ -116,7 +116,7 @@ field. Categories are managed by PATCHing the server's `categories` array
 
 Each category in the array is an object: `{"id": <client-generated string>, "title": <max 32 chars>, "channels": [<channel_ids>]}`. Category IDs are generated client-side (e.g. using a short UUID).
 
-**Step 1 — Build categories locally with generated IDs:**
+**Step 1: Build categories locally with generated IDs:**
 
 ```python
 from uuid import uuid4
@@ -127,7 +127,7 @@ categories = [
 await api_upsert_categories(session, stoat_url, token, server_id, categories)
 ```
 
-**Step 2 — After creating channels, update the categories array with channel IDs:**
+**Step 2: After creating channels, update the categories array with channel IDs:**
 
 ```python
 categories[0]["channels"] = [channel_id_1, channel_id_2]
@@ -146,8 +146,8 @@ bitmask.
 
 > **Read the source, not the docs site.** The authoritative list is the `ChannelPermission` enum in
 > `stoatchat/stoatchat` at `crates/core/permissions/src/models/channel.rs`. `developers.stoat.chat`
-> has lagged it, and an earlier revision of this page reproduced a 13-bit subset from that site —
-> which is how Ferry came to drop `MentionEveryone` as "nonexistent" and to ship voice channels that
+> has lagged it, and an earlier revision of this page reproduced a 13-bit subset from that site.
+> That is how Ferry came to drop `MentionEveryone` as "nonexistent" and to ship voice channels that
 > granted no voice permissions. Verified against Stoat v0.15.7 source on 2026-10-12 (commit
 > `5fb97ec4e7fd2f37fab38c834d3c354914ef4589`).
 
@@ -171,7 +171,7 @@ All **34** defined bits:
 | ViewChannel | 20 | |
 | ReadMessageHistory | 21 | |
 | SendMessage | 22 | |
-| ManageMessages | 23 | Required to pin messages — Stoat has no pin-only bit |
+| ManageMessages | 23 | Required to pin messages, because Stoat has no pin-only bit |
 | ManageWebhooks | 24 | |
 | InviteOthers | 25 | |
 | SendEmbeds | 26 | |
@@ -184,7 +184,7 @@ All **34** defined bits:
 | MuteMembers | 33 | |
 | DeafenMembers | 34 | |
 | MoveMembers | 35 | |
-| Listen | 36 | **Receive** audio and video — see below |
+| Listen | 36 | **Receive** audio and video, see below |
 | MentionEveryone | 37 | Needed by a non-owner migration to send `@everyone` or `@online`; Stoat refuses the message otherwise |
 | MentionRoles | 38 | Needed by a non-owner migration to send mapped role mentions |
 | BypassSlowmode | 39 | |
@@ -192,7 +192,7 @@ All **34** defined bits:
 
 Bit 5 and bits 14–19 are undefined gaps. Bits **41–52 are a declared "free area"** and 53–64 are
 marked do-not-use, so never derive an "all permissions" value from Stoat's `GrantAllSafe`
-(`0x000F_FFFF_FFFF_FFFF`) — it spans the free area, and Stoat computes it for server owners without
+(`0x000F_FFFF_FFFF_FFFF`). It spans the free area, and Stoat computes it for server owners without
 ever persisting it to a role.
 
 ### How Stoat resolves channel permissions
@@ -217,12 +217,12 @@ Bits 3, 4, 20, 21, 22, 23, 26, 27, 28, 29 sum to **1,022,361,624**.
 
 ```python
 FERRY_PERMISSIONS = (
-    8  # ManageRole       — masquerade colour
-    | 16  # ManageCustomisation — emoji
+    8  # ManageRole: masquerade colour
+    | 16  # ManageCustomisation: emoji
     | 1_048_576  # ViewChannel
     | 2_097_152  # ReadMessageHistory
     | 4_194_304  # SendMessage
-    | 8_388_608  # ManageMessages  — pins
+    | 8_388_608  # ManageMessages: pins
     | 67_108_864  # SendEmbeds
     | 134_217_728  # UploadFiles
     | 268_435_456  # Masquerade
@@ -247,20 +247,20 @@ Payload fields:
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `name` | string | Displayed username — the Discord author's display name |
+| `name` | string | Displayed username, the Discord author's display name |
 | `avatar` | string | Autumn CDN URL of the author's avatar |
-| `colour` | string | Hex colour string e.g. `"#5865F2"` — British spelling required |
+| `colour` | string | Hex colour string e.g. `"#5865F2"` (British spelling required) |
 
 Permission requirements:
 
-- `Masquerade` (bit 28) — required for `name` and `avatar`
-- `ManageRole` (bit 3) — additionally required to set `colour`
+- `Masquerade` (bit 28): required for `name` and `avatar`
+- `ManageRole` (bit 3): additionally required to set `colour`
 
 ---
 
 ## Autumn File Uploads
 
-Autumn is the Stoat media server. It cannot fetch URLs — **you must download the file locally first,
+Autumn is the Stoat media server. It cannot fetch URLs, so **you must download the file locally first,
 then upload it as multipart form data**.
 
 File size limits by tag:
@@ -275,8 +275,8 @@ File size limits by tag:
 
 Ferry's uploader maintains an in-memory cache keyed on the local file path. If the same file is
 encountered more than once (e.g. a user who appears as author in thousands of messages), their avatar
-is uploaded to Autumn only on the first occurrence and the returned CDN URL is reused for all
-subsequent messages.
+is uploaded to Autumn only on the first occurrence and the returned Autumn file id is cached.
+Ferry reuses that id for all later messages and builds the avatar URL from it at send time.
 
 A conservative 0.5 s sleep is inserted between Autumn upload requests to avoid bursting the
 catch-all bucket.
@@ -317,7 +317,7 @@ await api_send_message(
 !!! danger "This does NOT make the MESSAGES phase safe to re-run"
     An earlier revision of this page claimed that submitting the same key twice makes Stoat return
     the existing message instead of creating a duplicate. **Both halves of that are wrong**, and the
-    claim mattered — it was the stated reason resume was considered safe.
+    claim mattered, because it was the stated reason resume was considered safe.
 
     Verified against `crates/core/database/src/util/idempotency.rs` (2026-08-02):
 
@@ -329,7 +329,7 @@ await api_send_message(
       `ferry-merge-{id}`, `_p{n}` suffix), so this is not currently a constraint.
 
     A 1000-entry window is a handful of seconds of migration traffic. By the time any resume, retry
-    or repair runs, every relevant key is long gone — and after a server restart, immediately.
+    or repair runs, every relevant key is long gone, and after a server restart it is gone immediately.
 
 **What actually prevents duplicates is entirely client-side**, and each strategy has its own
 mechanism:
@@ -340,8 +340,8 @@ mechanism:
 | `merge` | `channel_high_water` per thread (durable) and `channel_message_offsets` (transient, mid-thread). **`merge` never writes `message_map`** | `messages.py` |
 | `--incremental` | the durable `channel_high_water` marker, with previously-failed ids deliberately re-attempted | `messages.py` |
 
-Treat the idempotency key as a cheap guard against an immediate double-send within one run — a
-retried request, a duplicated task — and nothing more.
+Treat the idempotency key as a cheap guard against an immediate double-send within one run (a
+retried request, a duplicated task) and nothing more.
 
 ### Ferry acts on the 409 as of v2.14.7
 
@@ -378,13 +378,13 @@ The Stoat API enforces maximum lengths on several fields. Ferry must truncate be
 
 | Field | Max Length | Regex | Enforced in |
 |-------|-----------|-------|-------------|
-| Channel name | 32 | — | `structure.py` |
-| Role name | 32 | — | `structure.py` |
-| Category title | 32 | — | `structure.py` |
-| Masquerade name | 32 | — | `messages.py` |
+| Channel name | 32 | none | `structure.py` |
+| Role name | 32 | none | `structure.py` |
+| Category title | 32 | none | `structure.py` |
+| Masquerade name | 32 | none | `messages.py` |
 | Emoji name | 32 | `^[a-z0-9_]+$` | `emoji.py` |
-| Message content | 2,000 | — | `messages.py` |
-| Channel topic / description | 1,024 | — | `structure.py`, `core/engine.py` (defence-in-depth against hand-edited exports) |
+| Message content | 2,000 | none | `messages.py` |
+| Channel topic / description | 1,024 | none | `structure.py`, `core/engine.py` (defence-in-depth against hand-edited exports) |
 
 Emoji names must be lowercase alphanumeric with underscores only. Names that don't match the regex
 are sanitised (lowercased, invalid characters replaced with underscores) during the EMOJI phase.
@@ -394,7 +394,7 @@ are sanitised (lowercased, invalid characters replaced with underscores) during 
 ## Emoji Creation
 
 Custom emoji are created via `PUT /custom/emoji/{emoji_id}` with a `parent` object identifying the
-owning server — **not** via `POST /servers/{id}/emojis`. The emoji ID is client-generated. The
+owning server, **not** via `POST /servers/{id}/emojis`. The emoji ID is client-generated. The
 `parent` object has `{"type": "Server", "id": "<server_id>"}`.
 
 Custom emoji creation uses the 20-per-10-second catch-all bucket. Ferry spaces creation attempts

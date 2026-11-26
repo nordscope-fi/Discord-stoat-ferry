@@ -21,7 +21,7 @@ request was a read. No setting was changed and no secret value was read.
 ## What a pull request can reach
 
 Two workflows run on `pull_request`: `ci.yml` and `release.yml` (only for changes to
-`ferry.spec`, `release.yml` or `core/http.py`). No workflow uses `pull_request_target` or
+`ferry.spec`, `pyproject.toml`, `uv.lock`, `release.yml` or `core/http.py`). No workflow uses `pull_request_target` or
 `workflow_run`.
 
 | Workflow and job | Token permissions | Secrets and OIDC | Risk |
@@ -106,28 +106,28 @@ PyPI publisher was checked by the owner and matches. The rest are still open.
 
 - **Block tag creation by others.** Settings, Rules, Rulesets, New tag ruleset: target
   `v*.*.*`, restrict creations, updates and deletions, and add the Ferry Auto-Tag Bot App
-  as the only bypass actor.
+  as the only bypass actor. Done on 2026-10-10 (owner applied).
 - **Require a person for the release.** Settings, Environments, `release`, Required
   reviewers: add yourself. Leave "Prevent self-review" off while you are the only
   collaborator. This puts one click between a tag and PyPI.
 - **Limit the auto-tag environment.** Settings, Environments, `auto-tag`, Deployment
   branches and tags: select "Selected branches and tags" and add `main`. A manual run of
-  `auto-tag.yml` from another branch could otherwise reach the App key.
+  `auto-tag.yml` from another branch could otherwise reach the App key. Done on 2026-10-10 (owner applied).
 - **Stop force pushes and deletion of `main`.** Settings, Rules, Rulesets, `main
-  protection`: turn on "Restrict deletions" and "Block force pushes".
+  protection`: turn on "Restrict deletions" and "Block force pushes". Done on 2026-10-10 (owner applied).
 - **Narrow the bypass.** Same ruleset, Bypass list: change the admin role from "Always"
   to "For pull requests only", so that even the owner goes through the checks.
 - **Check the PyPI publisher.** pypi.org, project `discord-ferry`, Manage, Publishing:
   confirm one GitHub publisher with owner `nordscope-fi`, repository
-  `Discord-stoat-ferry`, workflow `release.yml` and environment `release`.
+  `Discord-stoat-ferry`, workflow `release.yml` and environment `release`. Done (owner checked, it matches).
 - **Check the App scope.** Settings, GitHub Apps, Ferry Auto-Tag Bot, Configure: confirm
   it is installed on this repository only, with Contents read and write.
 - **Turn on immutable releases.** Settings, General, Releases: enable "Immutable
-  releases" so a published release and its tag cannot be edited.
+  releases" so a published release and its tag cannot be edited. Done on 2026-10-10 (owner applied).
 - **Require pinned actions.** Settings, Actions, General, Actions permissions: tick
-  "Require actions to be pinned to a full-length commit SHA".
+  "Require actions to be pinned to a full-length commit SHA". Done on 2026-10-10 (owner applied).
 - **Add the status checks that matter.** Ruleset `main protection`, Require status
-  checks: add `Contract test (DCE binary)` and `Instruction-layer gates`.
+  checks: add `Contract test (DCE binary)` and `Instruction-layer gates`. Done on 2026-10-10 (owner applied).
 
 ## What is still open
 

@@ -66,7 +66,7 @@ Stoat v0.15.7 maps `ErrorType::IsBot` to [`Status::BadRequest`](https://github.c
 
 | | |
 |---|---|
-| **Symptom** | Ferry warns, once per channel and with a count, that some messages "have mentions written as plain text instead of raw IDs". In Stoat those mentions arrive as `@Username` text |
+| **Symptom** | Ferry warns, with a count, that some messages "have mentions written as plain text instead of raw IDs". The validate screen sums the count across all export files. In Stoat those mentions arrive as `@Username` text |
 | **Cause** | Usually the export was created without `--markdown false`, so DiscordChatExporter rendered `<@123456789>` into `@Username` and the ID needed to rebuild the mention is gone. A message is also flagged when somebody typed a display name after an at-sign by hand, which is what the text looked like in Discord too. |
 | **Solution** | Check how the export was made before re-exporting. If `--markdown false` was missing, re-export with it and the mentions come back as IDs. If the export already used `--markdown false`, a re-export changes nothing, because the flagged text was typed that way in Discord. Either way, you can migrate the export as it stands: tick **I understand, migrate anyway** on the validate screen. What you give up is the link, since those mentions arrive as text with no link back to the user. |
 
@@ -221,7 +221,7 @@ If the window will not close, or Ferry does not start again, quit the leftovers 
 
 | | |
 |---|---|
-| **Symptom** | Ferry reports "Another migration is in progress" or "Migration lock detected" and refuses to start |
+| **Symptom** | Ferry reports "Another migration is in progress" and refuses to start |
 | **Cause** | A prior Ferry run set an advisory lock marker in the Stoat server description. This prevents two Ferry instances from running against the same server simultaneously. The lock expires after 24 hours, but may persist if the prior migration crashed before it could clean up. |
 | **Solution** | If the prior migration is genuinely still running, wait for it to finish. If it crashed, add `--force-unlock` to your command to clear the stale lock and proceed. |
 
@@ -257,7 +257,7 @@ If the window will not close, or Ferry does not start again, quit the leftovers 
 
 | | |
 |---|---|
-| **Symptom** | Ferry reports "DCE binary hash mismatch" or "SHA-256 verification failed" |
+| **Symptom** | Ferry reports "DCE binary hash mismatch" |
 | **Cause** | The downloaded DiscordChatExporter binary does not match the expected SHA-256 checksum. This can happen if the download was corrupted, if the cached binary is from a different version, or if you are using a self-built DCE binary. |
 | **Solution** | Delete the cached DCE binary (found in the Ferry data directory) and re-run Ferry, it will re-download a fresh copy. If you are using a self-built or custom DCE binary, pass `--skip-dce-verify` to bypass the checksum check. |
 
@@ -405,9 +405,9 @@ string turns off one scheme at a time. `http_proxy=""` disables the HTTP proxy w
 
 | | |
 |---|---|
-| **Symptom** | Messages in Stoat show `[+N more attachments not migrated]` at the end |
+| **Symptom** | Messages in Stoat show `[+N more attachment(s) not migrated (Stoat limit: 5): <file names>]` at the end |
 | **Cause** | The original Discord message had more than 5 attachments. Stoat allows a maximum of 5 attachments per message. This is a platform limit, not a Ferry bug. |
-| **Solution** | No action needed. The first 5 attachments are migrated. The overflow note tells you how many were left out. |
+| **Solution** | No action needed. The first 5 attachments are migrated. The overflow note tells you how many were left out and lists their file names. |
 
 ---
 
@@ -429,7 +429,7 @@ string turns off one scheme at a time. `http_proxy=""` disables the HTTP proxy w
 
 | | |
 |---|---|
-| **Symptom** | Avatar pre-flight reports "0 of N avatars uploaded" |
+| **Symptom** | Avatar pre-flight reports "Uploaded 0 of N unique avatars." |
 | **Cause** | Your DCE export does not include local avatar files. This happens when the export was created without the `--media` flag, so avatar URLs point to Discord's CDN instead of local files. |
 | **Solution** | Re-export from DiscordChatExporter with the `--media` flag. Ferry will then upload the locally downloaded avatar files. |
 
@@ -441,9 +441,9 @@ string turns off one scheme at a time. `http_proxy=""` disables the HTTP proxy w
 
 | | |
 |---|---|
-| **Symptom** | Post-migration validation warns about count differences between source and Stoat (e.g., "expected 25 channels, found 23") |
-| **Cause** | Some channels or roles were not created during migration, likely due to errors during the structure creation phase. |
-| **Solution** | Check the migration report (`migration_report.md` in your output directory) for specific errors. You can re-run the migration with `--resume` to retry failed items, or create the missing channels/roles manually on Stoat. |
+| **Symptom** | Post-migration validation (`--validate-after`) reports "Validation found issues: N failing, N warned, N ok." instead of "Validation passed" |
+| **Cause** | Validation looks up every channel, role, category and emoji by ID on the live server. A failing entry is one Ferry recorded but could not find, for example because it was deleted afterwards or its creation failed during the structure phase. |
+| **Solution** | Run `ferry check` for the per-item list, and check the migration report (`migration_report.md` in your output directory) for errors. `ferry repair` restores what the check found missing, or you can re-run the migration with `--resume` to retry failed items. |
 
 ---
 
