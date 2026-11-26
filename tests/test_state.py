@@ -28,6 +28,48 @@ def test_thread_parent_ids_round_trip_and_default_for_old_state(tmp_path: Path) 
     assert load_state(tmp_path).thread_parent_ids == {}
 
 
+def test_forum_key_forums_round_trip_and_default_for_old_state(tmp_path: Path) -> None:
+    """SC-0.1: the owner map survives a save and load; an old file loads it empty."""
+    saved = {
+        "forum-Ideas & help": ["300"],
+        "forum-Ideas & help~301": ["301"],
+    }
+    state = MigrationState(forum_key_forums=saved)
+    save_state(state, tmp_path)
+    assert load_state(tmp_path).forum_key_forums == saved
+    (tmp_path / "state.json").write_text('{"channel_map": {}}', encoding="utf-8")
+    assert load_state(tmp_path).forum_key_forums == {}
+
+
+def test_check_state_ids_accepts_a_well_formed_forum_key_forums() -> None:
+    from discord_ferry.state import check_state_ids
+
+    check_state_ids(
+        MigrationState(forum_key_forums={"forum-Ideas & help~301": ["301"], "forum-Q": ["1", "2"]})
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"Ideas & help": ["300"]},  # key lacks the forum- prefix
+        {"forum-": ["300"]},  # prefix only
+        {"forum-Ideas": ["abc"]},  # id is not a snowflake
+        {"forum-Ideas": [300]},  # id is not text
+        {"forum-Ideas": "300"},  # value is not a list
+        ["forum-Ideas"],  # whole field is not an object
+    ],
+)
+def test_check_state_ids_rejects_malformed_forum_key_forums(value: object) -> None:
+    """SC-0.2: the same strictness `thread_parent_ids` gets."""
+    from discord_ferry.state import StateError, check_state_ids
+
+    state = MigrationState()
+    state.forum_key_forums = value  # type: ignore[assignment]  # the malformed shape under test
+    with pytest.raises(StateError, match="forum_key_forums"):
+        check_state_ids(state)
+
+
 def test_staged_input_witness_roundtrips_and_legacy_state_defaults(tmp_path: Path) -> None:
     from discord_ferry import state as state_module
 
@@ -1557,6 +1599,9 @@ _KNOWN_STATE_FIELDS = frozenset(
         "source_messages_total",
         "forum_channel_members",
         "forum_category_names",
+        # Structural: generated forum keys and Discord forum ids only, no free text,
+        # so it stays out of _TEXT_MEMBERS (#1640).
+        "forum_key_forums",
         "channel_message_counts",
         "reaction_message_counts",
         "forum_index_message_ids",
