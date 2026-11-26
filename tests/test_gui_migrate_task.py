@@ -473,3 +473,58 @@ async def test_missing_tab_token_bounces_from_migrate(
 
     await user.open("/migrate")
     await user.should_not_see("Migration Running")
+
+
+@pytest.mark.parametrize("outcome", ["complete", "cancel", "failure"])
+async def test_force_unlock_lasts_one_run(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tmp_path: Path,
+    outcome: str,
+) -> None:
+    """SC-4.1 to SC-4.3, SC-4.5: the run sees force_unlock, which is cleared after it."""
+    from discord_ferry.errors import MigrationError
+
+    user_store["export_dir"] = str(tmp_path)
+    user_store["stoat_url"] = "https://example.invalid"
+    user_store["force_unlock"] = True
+    tab_store["token"] = "stoat-tok"
+
+    seen: list[bool] = []
+    running = asyncio.Event()
+    release = asyncio.Event()
+    returned = asyncio.Event()
+
+    async def fake_run_migration(config, *, on_event):  # type: ignore[no-untyped-def]
+        seen.append(config.force_unlock)
+        running.set()
+        try:
+            await release.wait()
+            if outcome == "cancel":
+                config.cancel_event.set()
+            elif outcome == "failure":
+                raise MigrationError("Could not acquire migration lock: boom")
+        finally:
+            returned.set()
+
+    with (
+        patch("discord_ferry.gui.run_migration", fake_run_migration),
+        patch("discord_ferry.gui.load_state", side_effect=FileNotFoundError),
+    ):
+        await user.open("/migrate")
+        await asyncio.wait_for(running.wait(), timeout=1)
+        # Still set while the run is in progress, so a reload keeps the choice.
+        assert user_store.get("force_unlock") is True
+        release.set()
+        await asyncio.wait_for(returned.wait(), timeout=1)
+        if outcome == "failure":
+            await user.should_see("Could not acquire migration lock")
+
+        for _ in range(50):
+            if "force_unlock" not in user_store:
+                break
+            await asyncio.sleep(0.01)
+
+    assert seen == [True]
+    assert "force_unlock" not in user_store

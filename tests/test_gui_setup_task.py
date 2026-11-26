@@ -135,3 +135,40 @@ async def test_official_service_warning_fires_for_high_concurrency(
     user.find("Continue").click()
 
     await user.should_see("Raising concurrency on the official Stoat service")
+
+
+@pytest.mark.parametrize("tick", [False, True])
+async def test_force_unlock_checkbox_saved_at_continue(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tick: bool,
+) -> None:
+    """SC-4.1, SC-4.4: Force unlock is off by default and saved when ticked."""
+    await user.open("/")
+
+    _find_input(user, "Stoat user token").set_value("stoat-tok")
+    _find_input(user, "Discord token").set_value("discord-tok")
+    _find_input(user, "Discord server ID").set_value("123456789012345678")
+    user.find("I acknowledge").click()
+    if tick:
+        user.find("Force unlock").click()
+    user.find("Continue").click()
+
+    await user.should_see("Exporting from Discord")
+    assert user_store["force_unlock"] is tick
+
+
+async def test_force_unlock_checkbox_never_starts_ticked(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """SC-4.3: a value left behind by an abandoned run does not pre-tick the box."""
+    from nicegui.elements.checkbox import Checkbox
+
+    user_store["force_unlock"] = True
+    await user.open("/")
+    boxes = [el for el in user.find("Force unlock").elements if isinstance(el, Checkbox)]
+    assert len(boxes) == 1
+    assert boxes[0].value is False
