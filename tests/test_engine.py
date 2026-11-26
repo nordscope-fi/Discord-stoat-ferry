@@ -12851,6 +12851,48 @@ async def test_lock_failure_with_force_unlock_continues(
     assert cause in hits[0]["message"]
 
 
+def test_lock_unavailable_warning_is_not_duplicated_on_resume(tmp_path: Path) -> None:
+    """#1676: a resumed forced run adds no second identical entry, but still warns on screen."""
+    from discord_ferry.core.engine import _lock_unavailable
+
+    config = _make_config(tmp_path, server_id="srv-001", dry_run=False, force_unlock=True)
+    state = MigrationState()
+    events: list[MigrationEvent] = []
+    for cause in ("Could not read the server.", "Could not read the server.", "Other cause."):
+        _lock_unavailable(config, state, events.append, stop_on_failure=True, cause=cause)
+    hits = [w for w in state.warnings if w.get("type") == "lock_unavailable"]
+    assert [w["message"] for w in hits] == [
+        "Could not read the server. Continuing without a migration lock.",
+        "Other cause. Continuing without a migration lock.",
+    ]
+    assert len(events) == 3
+    assert all(e.status == "warning" for e in events)
+
+
+def test_lock_unavailable_warning_matches_after_save_and_load(tmp_path: Path) -> None:
+    """#1676: a secret masked only when state.json is written must not defeat the check.
+
+    The proxy password lives in the process-wide registry, which ``save_state`` applies
+    and ``_safe`` does not, so the saved message and the rebuilt one must be compared in
+    the same masked form.
+    """
+    from discord_ferry.core.engine import _lock_unavailable
+    from discord_ferry.core.security import register_secret
+    from discord_ferry.state import load_state, save_state
+
+    register_secret("proxy_password", "hunter2-proxy-pw")
+    config = _make_config(tmp_path, server_id="srv-001", dry_run=False, force_unlock=True)
+    cause = "Could not acquire migration lock: proxy http://u:hunter2-proxy-pw@p:3128 refused"
+    state = MigrationState()
+    _lock_unavailable(config, state, lambda _e: None, stop_on_failure=True, cause=cause)
+    save_state(state, tmp_path)
+    resumed = load_state(tmp_path)
+    _lock_unavailable(config, resumed, lambda _e: None, stop_on_failure=True, cause=cause)
+    hits = [w for w in resumed.warnings if w.get("type") == "lock_unavailable"]
+    assert len(hits) == 1
+    assert "hunter2-proxy-pw" not in hits[0]["message"]
+
+
 async def test_write_that_landed_counts_as_acquired(tmp_path: Path) -> None:
     """SC-3.2: a write whose response was lost but which stored the marker is a lock."""
     import aiohttp

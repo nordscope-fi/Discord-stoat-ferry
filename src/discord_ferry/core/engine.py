@@ -38,6 +38,7 @@ from discord_ferry.core.security import (
     SecureTokenStore,
     register_secret,
     safe_sanitize,
+    sanitize_secrets,
     strip_control,
 )
 from discord_ferry.discord import (
@@ -1525,7 +1526,12 @@ def _lock_unavailable(
         )
     if stop_on_failure:
         message = _safe(config, f"{cause} Continuing without a migration lock.")
-        state.warnings.append({"phase": "connect", "type": "lock_unavailable", "message": message})
+        # Compare in the form state.json stores: `save_state` also masks the secrets in
+        # the process-wide registry (a proxy password), which `_safe` does not (#1676).
+        saved = sanitize_secrets(message)
+        entry = {"phase": "connect", "type": "lock_unavailable", "message": saved}
+        if entry not in state.warnings:
+            state.warnings.append(entry)
     else:
         message = _safe(config, cause)
     on_event(MigrationEvent(phase="connect", status="warning", message=message))

@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Update NiceGUI from 4.0.0 to 4.1.0, which keeps the tab storage of connected browser tabs when old tab storage is pruned, stops rewriting storage files on every load, and reloads the page instead of showing "Connection lost" forever after an expired session.
 - Refresh the user guides and reference pages against the code: the resume and validate steps, `--validate-after` (it verifies every entity by id), forum post support since 3.6.4, the GUI tool pages and completion buttons, quoted error and note text, the CLI command count, release asset names, and stale numbers, paths and fields in the architecture and Stoat API notes.
 
+### Fixed
+
+- A resumed `--force-unlock` run that again cannot take the migration lock no longer adds a second identical warning to the saved state. The on-screen warning still shows every run (#1676).
+
 ## [3.7.2] - 2026-11-26
 
 ### Changed
