@@ -1373,8 +1373,11 @@ def test_rollback_refuses_a_different_server_id(runner: CliRunner, tmp_path: Pat
         ],
     )
     assert result.exit_code == 1
-    assert "Rollback failed" in result.output
-    assert "belongs to Stoat server" in result.output
+    # Rich wraps console output at 80 columns, and a long temporary path moves the
+    # break, so compare with the line breaks folded away.
+    flat = " ".join(result.output.split())
+    assert "Rollback failed" in flat
+    assert "belongs to Stoat server" in flat
 
 
 def test_rollback_calls_engine_yes_flag(runner: CliRunner, tmp_path: Path) -> None:
