@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Release the migration lock by removing only this run's own marker from the server description, so a second marker left by another run is no longer deleted in its place (#1677).
+
 ### Changed
 
 - Allow snapshot evidence for the feedback-service defaults decision record only, with primary-checkout ownership, separate instruction bytes, and exact scoped backup checks (#1179).
