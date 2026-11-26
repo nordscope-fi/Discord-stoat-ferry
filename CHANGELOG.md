@@ -26,6 +26,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - The test suite no longer passes the caller's git location variables (`GIT_DIR`, `GIT_COMMON_DIR` and the rest) to the git commands it runs. A test's `git init` or `git config` could otherwise act on the caller's own repository and turn it into a bare one (#1639).
 
+## [3.7.8] - 2026-11-26
+
+### Fixed
+
+- The GUI now accepts a browser `Origin` only when it is one of Ferry's own addresses on port 8765. A page served by another program on port 80 of the same machine, whose origin is `http://localhost`, `http://127.0.0.1` or `http://[::1]` with no port, is now refused (#1700).
+
 ## [3.7.7] - 2026-11-26
 
 ### Fixed
