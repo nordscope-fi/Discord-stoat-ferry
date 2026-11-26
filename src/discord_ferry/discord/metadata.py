@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -19,6 +20,7 @@ from discord_ferry.core.permissions import (
 from discord_ferry.discord.models import normalize_channel_position
 from discord_ferry.discord.permissions import ALL_STOAT_PERMISSIONS, translate_permissions
 from discord_ferry.errors import MigrationError
+from discord_ferry.state import _FORUM_CATEGORY_KEY_PREFIX
 
 if TYPE_CHECKING:
     from collections.abc import Collection
@@ -27,6 +29,7 @@ if TYPE_CHECKING:
     from discord_ferry.config import FerryConfig
     from discord_ferry.discord.models import DiscordChannel, DiscordRole
     from discord_ferry.parser.models import DCEExport
+    from discord_ferry.state import MigrationState
 
 
 @dataclass
@@ -832,3 +835,87 @@ def is_forum_post(export: DCEExport, forum_ids: frozenset[str] = frozenset()) ->
     if not (export.is_thread and export.parent_channel_name):
         return False
     return export.channel.category_id in forum_ids or export.channel.type in _FORUM_PARENT_TYPES
+
+
+# One prefix for generated forum keys, shared with the state validator so the two
+# cannot drift (plan review, minor).
+_FORUM_KEY_PREFIX = _FORUM_CATEGORY_KEY_PREFIX
+_logger = logging.getLogger(__name__)
+
+
+def _forum_key_name(key: str, forum_id: str) -> str:
+    """The forum name a saved key was built from: ``forum-<name>`` or ``forum-<name>~<id>``."""
+    body = key.removeprefix(_FORUM_KEY_PREFIX)
+    suffix = f"~{forum_id}"
+    return body.removesuffix(suffix) if body.endswith(suffix) else body
+
+
+def _snowflake_order(forum_id: str) -> tuple[int, str]:
+    """Numeric order for digit strings, without converting an id that may not be one."""
+    return (len(forum_id), forum_id)
+
+
+def forum_key_table(
+    meta: DiscordMetadata | None,
+    state: MigrationState,
+    exports: Collection[DCEExport],
+) -> dict[str, str]:
+    """Map each known forum id to the key its posts are filed under (#1640).
+
+    Built once per phase from the bound metadata (which ids are forums), the saved
+    ``state.forum_key_forums`` (which forum owns which key) and the real-post exports in
+    hand (each forum's name). The saved metadata holds no forum names, so a forum that
+    is in neither the exports nor the saved map is not in the table and has nothing to
+    file. A forum already recorded under a key keeps it. For the rest, per name:
+
+    - plain key in ``category_map`` with no entry in ``forum_key_forums``: the state
+      predates this change, so every forum of that name keeps the plain key;
+    - an entry naming two or more forums: the state merged them, every forum keeps it;
+    - an entry naming one forum: that forum owns the plain key, the others get
+      ``forum-<name>~<forum id>``;
+    - otherwise a fresh key: the lowest forum id owns it, the others get the suffix.
+    """
+    forum_ids = forum_parent_ids(meta)
+    if not forum_ids:
+        return {}
+    table: dict[str, str] = {}
+    names: dict[str, str] = {}
+    for key, saved_ids in state.forum_key_forums.items():
+        for forum_id in saved_ids:
+            if forum_id in forum_ids and forum_id not in table:
+                table[forum_id] = key
+                names[forum_id] = _forum_key_name(key, forum_id)
+    for export in exports:
+        forum_id = export.channel.category_id
+        if export.is_thread and export.parent_channel_name and forum_id in forum_ids:
+            names.setdefault(forum_id, export.parent_channel_name)
+    by_name: dict[str, list[str]] = {}
+    for forum_id, name in names.items():
+        by_name.setdefault(name, []).append(forum_id)
+    for name, group in by_name.items():
+        plain = f"{_FORUM_KEY_PREFIX}{name}"
+        pending = sorted((f for f in group if f not in table), key=_snowflake_order)
+        if not pending:
+            continue
+        holders = state.forum_key_forums.get(plain)
+        pre_change = holders is None and plain in state.category_map
+        merged = holders is not None and len(holders) >= 2
+        if pre_change or merged:
+            for forum_id in pending:
+                table[forum_id] = plain
+            continue
+        plain_is_taken = holders is not None
+        for position, forum_id in enumerate(pending):
+            owns_plain = position == 0 and not plain_is_taken
+            table[forum_id] = plain if owns_plain else f"{plain}~{forum_id}"
+    claimed: dict[str, set[str]] = {}
+    for forum_id, key in table.items():
+        claimed.setdefault(key, set()).add(names[forum_id])
+    for forum_id, key in list(table.items()):
+        if len(claimed[key]) > 1:
+            _logger.warning(
+                "Forum %s would share a key with a forum of another name; using its plain key",
+                forum_id,
+            )
+            table[forum_id] = f"{_FORUM_KEY_PREFIX}{names[forum_id]}"
+    return table
