@@ -6483,6 +6483,24 @@ async def test_incremental_carries_the_recorded_names(tmp_path: Path) -> None:
     assert state.created_emoji_names == {"120": "party"}
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_incremental_carries_forum_key_forums(tmp_path: Path) -> None:
+    """#1640 SC-0.3: a dropped owner map would make the next run read a plain key as pre-change."""
+    from discord_ferry.state import save_state
+
+    prior = MigrationState(
+        channel_map={"100": "01J5T000000000000000000001"},
+        forum_key_forums={"forum-Ideas": ["300"], "forum-Ideas~301": ["301"]},
+    )
+    save_state(prior, tmp_path)
+
+    config = _make_config(tmp_path, incremental=True)
+    state = await run_migration(config, lambda _e: None, phase_overrides=_NOOP_OVERRIDES)
+
+    assert state.forum_key_forums == {"forum-Ideas": ["300"], "forum-Ideas~301": ["301"]}
+    assert state.forum_key_forums["forum-Ideas"] is not prior.forum_key_forums["forum-Ideas"]
+
+
 # ---------------------------------------------------------------------------
 # Predicate 2: nothing dropped by the carry-over (#288, SC-5.6 to SC-5.11)
 # ---------------------------------------------------------------------------

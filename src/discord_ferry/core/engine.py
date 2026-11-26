@@ -690,6 +690,7 @@ async def run_migration(
                 k: list(v) for k, v in prior.forum_channel_members.items()
             }
             state.forum_category_names = dict(prior.forum_category_names)
+            state.forum_key_forums = {k: list(v) for k, v in prior.forum_key_forums.items()}
             state.forum_index_message_ids = dict(prior.forum_index_message_ids)
             state.forum_index_present_unknown_id = set(prior.forum_index_present_unknown_id)
             state.channel_message_counts = dict(prior.channel_message_counts)
@@ -713,7 +714,8 @@ async def run_migration(
             #     --incremental delta skipping),
             #     failed_messages (so incremental self-heals prior failures — #76),
             #     channel_message_counts, forum_channel_members /
-            #     forum_category_names / forum_index_message_ids /
+            #     forum_category_names / forum_key_forums (the owner of each plain
+            #     forum key, #1640) / forum_index_message_ids /
             #     forum_index_present_unknown_id (the #215 duplicate marker, carried
             #     beside forum_index_message_ids so a resumed run keeps skipping an
             #     index whose id was lost rather than re-posting it),
