@@ -22,6 +22,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Update NiceGUI from 4.0.0 to 4.1.0, which keeps the tab storage of connected browser tabs when old tab storage is pruned, stops rewriting storage files on every load, and reloads the page instead of showing "Connection lost" forever after an expired session.
 - Refresh the user guides and reference pages against the code: the resume and validate steps, `--validate-after` (it verifies every entity by id), forum post support since 3.6.4, the GUI tool pages and completion buttons, quoted error and note text, the CLI command count, release asset names, and stale numbers, paths and fields in the architecture and Stoat API notes.
 
+## [3.7.6] - 2026-11-26
+
+### Fixed
+
+- The GUI now refuses any request that a browser marks as coming from another website, or from a hidden (`null`) origin, on pages, uploads and the live connection. Before, the live connection answered such requests and handed them a session. A refused request no longer receives a session cookie, because the guard now runs before the session layers (#1295).
+
 ## [3.7.5] - 2026-11-26
 
 ### Fixed
