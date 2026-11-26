@@ -225,6 +225,14 @@ If the window will not close, or Ferry does not start again, quit the leftovers 
 | **Cause** | A prior Ferry run set an advisory lock marker in the Stoat server description. This prevents two Ferry instances from running against the same server simultaneously. The lock expires after 24 hours, but may persist if the prior migration crashed before it could clean up. |
 | **Solution** | If the prior migration is genuinely still running, wait for it to finish. If it crashed, add `--force-unlock` to your command to clear the stale lock and proceed. |
 
+### Ferry cannot take the migration lock
+
+| | |
+|---|---|
+| **Symptom** | Ferry stops before migrating with "Could not fetch server for lock check", "Could not acquire migration lock", or "The server description is N characters, too long to add the migration lock" |
+| **Cause** | Before migrating into an existing server, Ferry adds a short lock marker to the server description so a second run cannot write into the same server at once. It stops when it cannot read the server, cannot write the marker, or the description has no room for it. Stoat allows 1024 characters in a server description. |
+| **Solution** | For a network or permission problem, fix it and run again. For a long description, shorten it in Stoat's server settings. To continue without a lock, add `--force-unlock`, or tick **Force unlock** in the GUI's Advanced Options. Ferry then records a warning in the report. |
+
 ### Stale resume flag on relaunch
 
 | | |

@@ -21,6 +21,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Note in the reference permission tables that a migration by an account that is not the server owner needs `MentionEveryone` for `@everyone` and `@online`, and `MentionRoles` for role mentions (#1626).
 - Update NiceGUI from 4.0.0 to 4.1.0, which keeps the tab storage of connected browser tabs when old tab storage is pruned, stops rewriting storage files on every load, and reloads the page instead of showing "Connection lost" forever after an expired session.
 
+## [3.7.0] - 2026-11-25
+
+### Changed
+
+- A migration into an existing server now stops before any phase runs when Ferry cannot take its server lock: when it cannot read the server, cannot write the lock marker, or the server description has no room for the marker. This used to be a warning, which let two runs write into one server at once. `--force-unlock` continues without a lock and records a `lock_unavailable` warning, and still overrides a stale lock. Rollback is unchanged (#983).
+- The lock marker never pushes a server description past Stoat's 1024-character limit, counted in characters the same way Stoat counts them. Ferry never shortens the owner's text to make room. When the Discord server description would not fit beside the marker, the server phase keeps the existing description so the lock stays in place, and records a `server_description_not_migrated` warning (#1201).
+- If a lock write fails but the marker was stored anyway, Ferry now sees it on a read-back and treats the lock as taken, so the run continues and removes the marker at the end.
+
+### Added
+
+- A **Force unlock** checkbox in the GUI's Advanced Options, matching `--force-unlock`. It applies to the next run only and is cleared when that run ends (#983).
+
 ## [3.6.6] - 2026-11-25
 
 ### Fixed

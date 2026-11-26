@@ -128,7 +128,7 @@ does not move, replace, or delete those files.
 | `--skip-avatars` | | false | Skip the avatar pre-flight phase; avatars still upload on demand during messages |
 | `--validate-after` | | false | After migration, fetch the server and compare channel/role counts against expectations (results in `state.json` and the run log) |
 | `--cleanup-orphans` | | false | Detect and report unreferenced Autumn uploads after migration (report-only; no files are deleted) |
-| `--force-unlock` | | false | Override a stale migration lock on the target Stoat server |
+| `--force-unlock` | | false | Override a stale migration lock on the target Stoat server, or continue without a lock when Ferry cannot take one (it records a warning) |
 | `--skip-dce-verify` | | false | Skip SHA-256 verification of DCE binary downloads (for self-built binaries) |
 | `--verbose` / `-v` | | false | Enable debug output (per-message logging) |
 | `--yes` / `-y` | | false | Skip the terms-of-service confirmation prompt (for scripted runs) |
