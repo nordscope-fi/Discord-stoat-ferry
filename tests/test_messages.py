@@ -41,6 +41,7 @@ from discord_ferry.parser.models import (
 )
 from discord_ferry.state import FailedMessage, MigrationState
 from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS
+from tests.forum_metadata import write_forum_metadata
 from tests.stoat_ids import stoat_id as valid_stoat_id
 from tests.test_delivery import (
     publication_permission_collaborator as publication_permission_collaborator,
@@ -3804,6 +3805,29 @@ async def test_real_shape_forum_post_header_follows_saved_routing(tmp_path: Path
         with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
             await run_messages(config, state, [export], lambda e: None)
         assert sent[0].get("content") == expected, f"members={members}"
+
+
+@pytest.mark.usefixtures("publication_permission_collaborator")
+async def test_forum_post_header_found_from_metadata_without_saved_members(
+    tmp_path: Path,
+) -> None:
+    """#1641: a pre-3.6.4 state has no forum_channel_members; metadata still names the forum."""
+    write_forum_metadata(tmp_path, guild_id="111", forum_id="300")
+    for category_id, expected in (
+        ("300", "[Forum post migrated from #general]"),
+        ("plain-parent", "[Thread migrated from #general]"),
+    ):
+        sent: list[dict[str, Any]] = []
+        state = _make_state(
+            channel_high_water={}, channel_message_offsets={}, forum_channel_members={}
+        )
+        config = _make_config(tmp_path, resume=True)
+        export = _make_thread_export(messages=[_make_message(id="100")], channel_type=11)
+        export.channel.category_id = category_id
+        export.guild = DCEGuild(id="111", name="Test Guild")
+        with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+            await run_messages(config, state, [export], lambda e: None)
+        assert sent[0].get("content") == expected, f"category_id={category_id}"
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Label real forum posts as "Forum post" instead of "Thread" when resuming or repairing a migration whose channels phase ran before 3.6.4, by reading the forum channels from the saved Discord metadata (#1641).
+
 ### Changed
 
 - Allow snapshot evidence for the feedback-service defaults decision record only, with primary-checkout ownership, separate instruction bytes, and exact scoped backup checks (#1179).
