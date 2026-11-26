@@ -569,7 +569,10 @@ _common_options = [
         "--force-unlock",
         is_flag=True,
         default=False,
-        help="Override a stale migration lock on the target server (S17)",
+        help=(
+            "Override a stale migration lock on the target server, or continue "
+            "without a lock when one cannot be taken (S17)"
+        ),
     ),
     click.option(
         "--reaction-mode",

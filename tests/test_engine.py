@@ -12776,3 +12776,206 @@ async def test_expired_marker_stripped_before_cap_check(tmp_path: Path) -> None:
             )
     assert acquired is True
     assert len(mock_edit.call_args.kwargs["description"]) == 1024
+
+
+# --- #983: a migration stops when it cannot take its server lock ---
+
+
+def _lock_fail(exc_text: str = "boom") -> AsyncMock:
+    return AsyncMock(side_effect=MigrationError(exc_text))
+
+
+_LOCK_FAILURES = [
+    pytest.param(_lock_fail(), AsyncMock(), "Could not fetch server for lock check", id="read"),
+    pytest.param(
+        AsyncMock(return_value={"description": "Hi"}),
+        _lock_fail(),
+        "Could not acquire migration lock",
+        id="write",
+    ),
+    pytest.param(
+        AsyncMock(return_value={"description": "a" * 1000}),
+        AsyncMock(),
+        "too long to add the migration lock",
+        id="over-cap",
+    ),
+]
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+@pytest.mark.parametrize(("fetch", "edit", "cause"), _LOCK_FAILURES)
+async def test_lock_failure_stops_migration(
+    tmp_path: Path, fetch: AsyncMock, edit: AsyncMock, cause: str
+) -> None:
+    """SC-1.1 to SC-1.4, SC-2.2: stop before any phase, name the way out, no release."""
+    ran: list[str] = []
+
+    def _recorder(name: str) -> PhaseFunction:
+        async def _phase(*_a: object, **_k: object) -> None:
+            ran.append(name)
+
+        return _phase
+
+    overrides = {name: _recorder(name) for name in _NOOP_OVERRIDES}
+    config = _make_config(tmp_path, server_id="srv-001", dry_run=False)
+    with (
+        patch("discord_ferry.core.engine.socket.gethostname", return_value="h"),
+        patch("discord_ferry.core.engine.api_fetch_server", fetch),
+        patch("discord_ferry.core.engine.api_edit_server", edit),
+        patch("discord_ferry.core.engine._release_migration_lock") as release,
+        pytest.raises(MigrationError, match=cause) as caught,
+    ):
+        await run_migration(config, lambda e: None, phase_overrides=overrides)
+    assert "--force-unlock" in str(caught.value)
+    assert "test-token" not in str(caught.value)
+    assert ran == []
+    release.assert_not_called()
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+@pytest.mark.parametrize(("fetch", "edit", "cause"), _LOCK_FAILURES)
+async def test_lock_failure_with_force_unlock_continues(
+    tmp_path: Path, fetch: AsyncMock, edit: AsyncMock, cause: str
+) -> None:
+    """SC-3.1: with the override each failure continues with exactly one warning."""
+    config = _make_config(tmp_path, server_id="srv-001", dry_run=False, force_unlock=True)
+    with (
+        patch("discord_ferry.core.engine.socket.gethostname", return_value="h"),
+        patch("discord_ferry.core.engine.api_fetch_server", fetch),
+        patch("discord_ferry.core.engine.api_edit_server", edit),
+    ):
+        state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+    hits = [w for w in state.warnings if w.get("type") == "lock_unavailable"]
+    assert len(hits) == 1
+    assert hits[0]["phase"] == "connect"
+    assert cause in hits[0]["message"]
+
+
+async def test_write_that_landed_counts_as_acquired(tmp_path: Path) -> None:
+    """SC-3.2: a write whose response was lost but which stored the marker is a lock."""
+    import aiohttp
+
+    from discord_ferry.core.engine import _acquire_migration_lock
+
+    state = MigrationState()
+    config = _make_config(tmp_path, server_id="srv-001")
+    written: dict[str, str] = {}
+
+    async def edit(*_a: object, description: str, **_k: object) -> None:
+        written["d"] = description
+        raise MigrationError("response lost")
+
+    async def fetch(*_a: object, **_k: object) -> dict[str, str]:
+        return {"description": written.get("d", "Hi")}
+
+    with (
+        patch("discord_ferry.core.engine.api_fetch_server", side_effect=fetch),
+        patch("discord_ferry.core.engine.api_edit_server", side_effect=edit),
+    ):
+        async with aiohttp.ClientSession() as session:
+            ok = await _acquire_migration_lock(
+                config, state, session, lambda e: None, stop_on_failure=True
+            )
+    assert ok is True
+    assert state.migration_lock_marker
+    assert state.migration_lock_marker in written["d"]
+
+
+async def test_read_back_failure_still_stops(tmp_path: Path) -> None:
+    """SC-1.8: if the read-back also fails, the write failure stops the run."""
+    import aiohttp
+
+    from discord_ferry.core.engine import _acquire_migration_lock
+
+    fetch = AsyncMock(side_effect=[{"description": "Hi"}, MigrationError("down")])
+    config = _make_config(tmp_path, server_id="srv-001")
+    state = MigrationState()
+    with (
+        patch("discord_ferry.core.engine.api_fetch_server", fetch),
+        patch("discord_ferry.core.engine.api_edit_server", _lock_fail()),
+        pytest.raises(MigrationError, match="Could not acquire migration lock"),
+    ):
+        async with aiohttp.ClientSession() as session:
+            await _acquire_migration_lock(
+                config, state, session, lambda e: None, stop_on_failure=True
+            )
+    assert state.migration_lock_marker == ""
+
+
+async def test_rollback_lock_failure_message_unchanged(tmp_path: Path) -> None:
+    """SC-1.7: without stop_on_failure the helper behaves exactly as before."""
+    import aiohttp
+
+    from discord_ferry.core.engine import _acquire_migration_lock
+
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, server_id="srv-001")
+    state = MigrationState()
+    with (
+        patch(
+            "discord_ferry.core.engine.api_fetch_server",
+            AsyncMock(return_value={"description": "Hi"}),
+        ),
+        patch("discord_ferry.core.engine.api_edit_server", _lock_fail("500")),
+    ):
+        async with aiohttp.ClientSession() as session:
+            assert await _acquire_migration_lock(config, state, session, events.append) is False
+    assert [e.message for e in events] == ["Could not acquire migration lock: 500"]
+    assert state.warnings == []
+
+
+@pytest.mark.parametrize("force_unlock", [False, True])
+async def test_live_lock_unchanged_with_stop_on_failure(tmp_path: Path, force_unlock: bool) -> None:
+    """SC-3.3: a live lock stops without the override and is replaced with it."""
+    import time
+
+    import aiohttp
+
+    from discord_ferry.core.engine import _acquire_migration_lock
+
+    live = f"[FERRY_LOCK:{int(time.time()) - 60}:other-host]"
+    config = _make_config(tmp_path, server_id="srv-001", force_unlock=force_unlock)
+    with (
+        patch(
+            "discord_ferry.core.engine.api_fetch_server",
+            AsyncMock(return_value={"description": live}),
+        ),
+        patch("discord_ferry.core.engine.api_edit_server") as mock_edit,
+    ):
+        async with aiohttp.ClientSession() as session:
+            if force_unlock:
+                assert await _acquire_migration_lock(
+                    config, MigrationState(), session, lambda e: None, stop_on_failure=True
+                )
+                assert live not in mock_edit.call_args.kwargs["description"]
+            else:
+                with pytest.raises(MigrationError, match="Another migration is in progress"):
+                    await _acquire_migration_lock(
+                        config, MigrationState(), session, lambda e: None, stop_on_failure=True
+                    )
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_incremental_lock_stop_leaves_saved_state_unchanged(tmp_path: Path) -> None:
+    """SC-I3: an incremental run that cannot take the lock does not touch state.json."""
+    from discord_ferry import state as state_module
+    from tests.stoat_ids import stoat_id
+
+    prior = MigrationState()
+    state_module.ensure_delivery_namespace(prior, tmp_path, "https://api.test")
+    prior.stoat_server_id = stoat_id(1)
+    state_module.save_state(prior, tmp_path)
+    before = (tmp_path / "state.json").read_bytes()
+
+    config = _make_config(tmp_path, server_id=stoat_id(1), dry_run=False, incremental=True)
+    with (
+        patch("discord_ferry.core.engine._initialize_upload_limits", new_callable=AsyncMock),
+        patch(
+            "discord_ferry.core.engine.api_fetch_server",
+            AsyncMock(return_value={"description": "Hi"}),
+        ),
+        patch("discord_ferry.core.engine.api_edit_server", _lock_fail()),
+        pytest.raises(MigrationError, match="Could not acquire migration lock"),
+    ):
+        await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert (tmp_path / "state.json").read_bytes() == before
