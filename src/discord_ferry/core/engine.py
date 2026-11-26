@@ -3357,6 +3357,7 @@ async def _resend_channel(
     on_event: EventCallback,
     *,
     delivery_outcomes: DeliveryOutcomes | None = None,
+    forum_ids: frozenset[str] = frozenset(),
 ) -> int:
     """Re-send every message this export holds. Returns the count that landed.
 
@@ -3374,7 +3375,7 @@ async def _resend_channel(
         forum_members = {sid for ids in state.forum_channel_members.values() for sid in ids}
         header = (
             f"[Forum post migrated from #{export.parent_channel_name}]"
-            if export.channel.type in (15, 16) or export.channel.id in forum_members
+            if is_forum_post(export, forum_ids) or export.channel.id in forum_members
             else f"[Thread migrated from #{export.parent_channel_name}]"
         )
         header_delivery = await deliver_part(
@@ -4955,6 +4956,7 @@ async def _run_repair(
                                 matching,
                                 on_event,
                                 delivery_outcomes=delivery_outcomes,
+                                forum_ids=forum_parent_ids(metadata),
                             )
                             action["resent_count"] = count
                             on_event(

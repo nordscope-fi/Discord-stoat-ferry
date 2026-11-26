@@ -1569,6 +1569,43 @@ async def test_resend_channel_forum_header_follows_saved_routing(tmp_path, monke
     assert contents == ["[Forum post migrated from #feedback-forum]"]
 
 
+async def test_resend_channel_forum_header_found_from_metadata(tmp_path, monkeypatch):
+    """#1641: a pre-3.6.4 state has no forum_channel_members; metadata still names the forum."""
+    from discord_ferry.discord.metadata import forum_parent_ids, load_bound_discord_metadata
+    from tests.forum_metadata import write_forum_metadata
+
+    write_forum_metadata(tmp_path, guild_id="111", forum_id="300")
+    monkeypatch.setattr(engine_module, "ensure_delivery_namespace", lambda *_a: None)
+    monkeypatch.setattr(engine_module, "begin_delivery_replacement", lambda _s, _o, ref: ref)
+    config = _make_config(tmp_path)
+    contents: list[str] = []
+
+    async def capture(**kwargs):
+        contents.append(kwargs["content"])
+        raise RuntimeError("stop after header")
+
+    monkeypatch.setattr(engine_module, "deliver_part", capture)
+    for category_id, expected in (
+        ("300", "[Forum post migrated from #feedback-forum]"),
+        ("999", "[Thread migrated from #feedback-forum]"),
+    ):
+        contents.clear()
+        export = DCEExport(
+            DCEGuild("111", "source"),
+            DCEChannel("ch1", 11, "post", category_id=category_id),
+            is_thread=True,
+            parent_channel_name="feedback-forum",
+        )
+        forum_ids = forum_parent_ids(load_bound_discord_metadata(config, [export]))
+        assert forum_ids == {"300"}
+        state = MigrationState(channel_map={"ch1": "t1"}, forum_channel_members={})
+        with pytest.raises(RuntimeError, match="stop after header"):
+            await engine_module._resend_channel(
+                AsyncMock(), config, state, export, lambda _e: None, forum_ids=forum_ids
+            )
+        assert contents == [expected], f"category_id={category_id}"
+
+
 def test_permission_index_sources_bind_a_carried_real_shape_forum():
     """#1217 SC-1.5: a carried real-shape forum keeps its index binding."""
     exports = [
@@ -8916,6 +8953,24 @@ async def test_a_recreated_forum_post_gets_the_forum_wording(tmp_path: Path) -> 
     _, bodies, _ = await _repair_resending(
         tmp_path, exports=[export], msg_ids=["100000000000000001"]
     )
+    assert "[Forum post migrated from #ideas]" in bodies, bodies
+
+
+@pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
+async def test_repair_labels_a_forum_post_from_saved_discord_details(tmp_path: Path) -> None:
+    """#1641: repair passes the forum ids from the saved Discord details to the resend.
+
+    The state predates 3.6.4, so ``forum_channel_members`` is empty and the post is a
+    plain type 11 thread. Only the metadata says its parent (``300``) is a forum.
+    """
+    from tests.forum_metadata import write_forum_metadata
+
+    write_forum_metadata(tmp_path / "output", guild_id="900000000000000009", forum_id="300")
+    post = _thread_export(R_D_CHANNEL, parent="ideas", ch_type=11)
+    post.channel.category_id = "300"
+    post.messages.append(_dce_msg("100000000000000001"))
+    _, bodies, _ = await _repair_resending(tmp_path, exports=[post], msg_ids=["100000000000000001"])
     assert "[Forum post migrated from #ideas]" in bodies, bodies
 
 

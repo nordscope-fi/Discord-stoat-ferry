@@ -14,6 +14,11 @@ from discord_ferry.core.atomicio import ensure_output_subdir, write_text_no_foll
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.permissions import require_permission_runtime
 from discord_ferry.core.security import safe_sanitize
+from discord_ferry.discord.metadata import (
+    forum_parent_ids,
+    is_forum_post,
+    load_bound_discord_metadata,
+)
 from discord_ferry.errors import DeliveryUnresolvedError, PermissionSafetyError, StateError
 from discord_ferry.migrator.api import api_send_message as api_send_message
 from discord_ferry.migrator.api import get_rate_multiplier, get_session
@@ -576,6 +581,9 @@ async def run_messages(
     # GUI storage value or direct FerryConfig construction can bypass them.
     channel_sem = asyncio.Semaphore(max(config.max_concurrent_channels, 1))
     save_lock = asyncio.Lock()
+    # Forum parents from the bound Discord metadata, so a state saved before 3.6.4
+    # (no forum_channel_members) still labels real forum posts (#1641).
+    forum_ids = forum_parent_ids(load_bound_discord_metadata(config, exports))
 
     async with get_session(config) as session:
         tasks: list[asyncio.Task[ChannelResult]] = []
@@ -594,6 +602,7 @@ async def run_messages(
                     save_lock=save_lock,
                     source_channel_names=source_channel_names,
                     delivery_outcomes=delivery_outcomes,
+                    forum_ids=forum_ids,
                 )
             except PermissionSafetyError as exc:
                 if permission_error is None:
@@ -1338,6 +1347,7 @@ async def _process_single_channel(
     save_lock: asyncio.Lock,
     source_channel_names: dict[str, str],
     delivery_outcomes: DeliveryOutcomes | None = None,
+    forum_ids: frozenset[str] = frozenset(),
 ) -> ChannelResult:
     """Process all messages in a single channel, returning a ChannelResult.
 
@@ -1369,7 +1379,7 @@ async def _process_single_channel(
             and export.channel.id not in state.channel_high_water
         ):
             forum_members = {sid for ids in state.forum_channel_members.values() for sid in ids}
-            if export.channel.type in (15, 16) or export.channel.id in forum_members:
+            if is_forum_post(export, forum_ids) or export.channel.id in forum_members:
                 header = f"[Forum post migrated from #{export.parent_channel_name}]"
             else:
                 header = f"[Thread migrated from #{export.parent_channel_name}]"
