@@ -528,3 +528,51 @@ async def test_force_unlock_lasts_one_run(
 
     assert seen == [True]
     assert "force_unlock" not in user_store
+
+
+async def test_mismatched_server_refusal_is_shown(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    """SC-4.1 (#1653): the engine's refusal appears and the Resume choice is kept.
+
+    Saved progress makes the page offer Resume. After the user resumes and the
+    engine refuses, the stored choice stays on Resume: only the StateError branch
+    clears it, so fixing the server id and running again offers Resume once more.
+    """
+    from discord_ferry.errors import MigrationError
+    from discord_ferry.state import MigrationState
+
+    user_store["export_dir"] = str(tmp_path)
+    user_store["output_dir"] = str(tmp_path)
+    user_store["stoat_url"] = "https://example.invalid"
+    user_store["server_id"] = "requested-server"
+    tab_store["token"] = "stoat-tok"
+    (tmp_path / "state.json").write_text("{}", encoding="utf-8")  # existence check only
+    saved = MigrationState(stoat_server_id="saved-server", current_phase="messages")
+    refusal = (
+        f"The saved progress in {tmp_path} belongs to Stoat server 'saved-server', "
+        "but --server-id is 'requested-server'."
+    )
+    returned = asyncio.Event()
+
+    async def fake_run_migration(config, *, on_event):  # type: ignore[no-untyped-def]
+        try:
+            assert config.resume is True
+            raise MigrationError(refusal)
+        finally:
+            returned.set()
+
+    with (
+        patch("discord_ferry.gui.run_migration", fake_run_migration),
+        patch("discord_ferry.gui.load_state", return_value=saved),
+    ):
+        await user.open("/migrate")
+        await user.should_see("Previous migration found")
+        user.find("Resume").click()
+        await asyncio.wait_for(returned.wait(), timeout=1)
+        await user.should_see("belongs to Stoat server")
+
+    assert user_store.get("resume") is True
