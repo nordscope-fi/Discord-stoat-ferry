@@ -2530,6 +2530,9 @@ async def _pick_folder(window: Any | None) -> str | None:
 _HOST = "127.0.0.1"
 _PORT = 8765
 _URL = f"http://{_HOST}:{_PORT}"
+# The loopback names a local page or the native window can use. The port is read at
+# call time from _PORT, which the native-startup harness and tests patch.
+_LOOPBACK_NAMES: frozenset[str] = frozenset({_HOST, "127.0.0.1", "localhost", "[::1]"})
 
 _RENDERER_DEAD_ROUTE = "/_ferry/renderer-dead"
 
@@ -2632,13 +2635,17 @@ def _install_renderer_fallback(fallback: BrowserFallback) -> None:
 
 def _allowed_host_headers() -> frozenset[str]:
     """Every Host value a local page or the native window can legitimately send."""
-    names = {_HOST, "127.0.0.1", "localhost", "[::1]"}
-    return frozenset(value for name in names for value in (name.lower(), f"{name.lower()}:{_PORT}"))
+    return frozenset(
+        value for name in _LOOPBACK_NAMES for value in (name.lower(), f"{name.lower()}:{_PORT}")
+    )
 
 
 def _allowed_origins() -> frozenset[str]:
-    """Origins Ferry's own page and native window send: http plus an allowed Host."""
-    return frozenset(f"http://{host}" for host in _allowed_host_headers())
+    """Origins Ferry's own page and native window send: http, a loopback name, the GUI port.
+
+    A port-less origin is a page on port 80 of this machine, never Ferry (#1700).
+    """
+    return frozenset(f"http://{name.lower()}:{_PORT}" for name in _LOOPBACK_NAMES)
 
 
 class _LoopbackHostGuard:

@@ -298,13 +298,47 @@ class TestOriginCheck:
 
     @pytest.mark.parametrize(
         "origin",
-        [f"http://{h}" for h in sorted(gui._allowed_host_headers())]
-        + [f"HTTP://LOCALHOST:{gui._PORT}"],
+        [
+            "http://127.0.0.1:8765",
+            "http://localhost:8765",
+            "http://[::1]:8765",
+            "HTTP://LOCALHOST:8765",
+        ],
     )
     @pytest.mark.parametrize("kind", ["http", "websocket"])
     async def test_ferry_origin_passes(self, origin: str, kind: str) -> None:
         _sent, reached = await _drive_guard(_scope(kind, _FERRY, _POLLING, origin=origin))
         assert reached
+
+    @pytest.mark.parametrize("origin", ["http://localhost", "http://127.0.0.1", "http://[::1]"])
+    async def test_origin_without_the_port_is_refused(self, origin: str) -> None:
+        """#1700: a port-less origin is a page on port 80 of this machine, never Ferry."""
+        sent, reached = await _drive_guard(_scope("http", _FERRY, _POLLING, origin=origin))
+        assert not reached
+        assert sent[0]["status"] == 400
+        assert sent[1]["body"] == b"Invalid origin header"
+        sent, reached = await _drive_guard(_scope("websocket", _FERRY, _POLLING, origin=origin))
+        assert not reached
+        assert [m["type"] for m in sent] == ["websocket.close"]
+
+    def test_host_list_keeps_its_port_less_names(self) -> None:
+        """#1700 changes origins only; the Host check still accepts port-less names."""
+        assert gui._allowed_host_headers() == {
+            "127.0.0.1",
+            "127.0.0.1:8765",
+            "localhost",
+            "localhost:8765",
+            "[::1]",
+            "[::1]:8765",
+        }
+
+    def test_origins_follow_the_gui_port(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gui, "_PORT", 9876)
+        assert gui._allowed_origins() == {
+            "http://127.0.0.1:9876",
+            "http://localhost:9876",
+            "http://[::1]:9876",
+        }
 
     async def test_no_origin_passes(self) -> None:
         _sent, reached = await _drive_guard(_scope("http", _FERRY, "/"))
