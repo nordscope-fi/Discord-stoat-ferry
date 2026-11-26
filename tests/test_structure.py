@@ -4832,6 +4832,150 @@ async def test_run_channels_forum_rerun_creates_nothing_new(
     ) == before
 
 
+PLAIN_FORUM = "forum-Ideas & help"
+SECOND_FORUM = "forum-Ideas & help~301"
+
+
+def _forums_meta(*forum_ids: str):
+    """#1640: bound metadata listing forums only, as a later run's metadata does."""
+    from discord_ferry.discord import client
+    from discord_ferry.discord.metadata import DiscordMetadata, capture_permission_source
+
+    forums = [
+        client._parse_channel({"id": fid, "name": "forum", "type": 15, "guild_id": "111"})
+        for fid in forum_ids
+    ]
+    return DiscordMetadata(
+        "111", "now", 0, {}, {}, permission_source=capture_permission_source("111", [], forums)
+    )
+
+
+def _forum_post(post_id: str, forum_id: str, name: str = "Ideas & help"):
+    return _make_export(
+        channel_id=post_id,
+        channel_name=f"post-{post_id}",
+        channel_type=11,
+        is_thread=True,
+        parent_channel_name=name,
+        category_id=forum_id,
+        category=name,
+    )
+
+
+def _bind_forums(monkeypatch: pytest.MonkeyPatch, *forum_ids: str) -> None:
+    monkeypatch.setattr(
+        structure_module, "load_bound_discord_metadata", lambda *_a, **_k: _forums_meta(*forum_ids)
+    )
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_run_channels_separates_two_same_named_forums(
+    channel_attributes_only, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1640 SC-1.2 (keys, members, owners): two forums named alike get two of everything."""
+    _bind_forums(monkeypatch, "300", "301")
+    state = MigrationState(stoat_server_id="srv1")
+    exports = [_forum_post("222", "300"), _forum_post("333", "301")]
+    with aioresponses() as m:
+        for stoat_id in ("stoat-222", "stoat-333", "stoat-idx1", "stoat-idx2"):
+            m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": stoat_id, "name": "x"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
+        await run_channels(_make_config(tmp_path, upload_delay=0), state, exports, lambda _e: None)
+    assert set(state.category_map) == {PLAIN_FORUM, SECOND_FORUM}
+    assert {k for k in state.channel_map if k.startswith("forum-index-")} == {
+        f"forum-index-{PLAIN_FORUM}",
+        f"forum-index-{SECOND_FORUM}",
+    }
+    assert state.forum_channel_members == {PLAIN_FORUM: ["222"], SECOND_FORUM: ["333"]}
+    assert state.channel_categories["222"] == PLAIN_FORUM
+    assert state.channel_categories["333"] == SECOND_FORUM
+    assert state.forum_key_forums == {PLAIN_FORUM: ["300"], SECOND_FORUM: ["301"]}
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_run_channels_records_the_owner_before_the_first_channel_is_created(
+    channel_attributes_only, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1640 SC-1.3: a crash after the categories exist leaves no plain key without an owner."""
+    from discord_ferry.errors import MigrationError
+
+    _bind_forums(monkeypatch, "300", "301")
+    state = MigrationState(stoat_server_id="srv1")
+    exports = [_forum_post("222", "300"), _forum_post("333", "301")]
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", status=400)
+        with pytest.raises(MigrationError):
+            await run_channels(
+                _make_config(tmp_path, upload_delay=0), state, exports, lambda _e: None
+            )
+    assert state.forum_key_forums == {PLAIN_FORUM: ["300"], SECOND_FORUM: ["301"]}
+    with aioresponses() as m:
+        for stoat_id in ("stoat-222", "stoat-333", "stoat-idx1", "stoat-idx2"):
+            m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": stoat_id, "name": "x"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
+        await run_channels(
+            _make_config(tmp_path, upload_delay=0, resume=True), state, exports, lambda _e: None
+        )
+    assert state.channel_categories["333"] == SECOND_FORUM
+    assert state.forum_channel_members == {PLAIN_FORUM: ["222"], SECOND_FORUM: ["333"]}
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_run_channels_keeps_a_pre_change_merged_state_merged(
+    channel_attributes_only, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1640 SC-3.1: a plain key with no owner entry keeps taking both forums' new posts."""
+    _bind_forums(monkeypatch, "300", "301")
+    state = MigrationState(
+        stoat_server_id="srv1",
+        channel_map={
+            "222": "stoat-222",
+            "333": "stoat-333",
+            f"forum-index-{PLAIN_FORUM}": "stoat-idx",
+        },
+        category_map={PLAIN_FORUM: "stoat-cat"},
+        category_names={PLAIN_FORUM: "Ideas & help"},
+        forum_category_names={PLAIN_FORUM: "Ideas & help"},
+        forum_channel_members={PLAIN_FORUM: ["222", "333"]},
+        channel_categories={"222": PLAIN_FORUM, "333": PLAIN_FORUM},
+    )
+    exports = [_forum_post("444", "300"), _forum_post("555", "301")]
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-444", "name": "x"})
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-555", "name": "x"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
+        await run_channels(
+            _make_config(tmp_path, upload_delay=0, incremental=True),
+            state,
+            exports,
+            lambda _e: None,
+        )
+    posts = [
+        call for (method, _url), calls in m.requests.items() if method == "POST" for call in calls
+    ]
+    assert len(posts) == 2  # two post channels, no category and no index
+    assert set(state.category_map) == {PLAIN_FORUM}
+    assert state.forum_channel_members == {PLAIN_FORUM: ["222", "333", "444", "555"]}
+    assert state.forum_key_forums == {}  # nothing invented an owner for a merged key
+
+
+async def test_run_channels_dry_run_writes_no_owner_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1640 SC-3.3: a dry run writes placeholders and leaves the owner map empty."""
+    _bind_forums(monkeypatch, "300", "301")
+    state = MigrationState(stoat_server_id="srv1")
+    exports = [_forum_post("222", "300"), _forum_post("333", "301")]
+    await run_channels(
+        _make_config(tmp_path, upload_delay=0, dry_run=True), state, exports, lambda _e: None
+    )
+    assert state.category_map == {
+        PLAIN_FORUM: f"dry-cat-{PLAIN_FORUM}",
+        SECOND_FORUM: f"dry-cat-{SECOND_FORUM}",
+    }
+    assert state.forum_key_forums == {}
+
+
 @pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_truncates_at_200(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase truncates to 200 channels, dropping threads first."""

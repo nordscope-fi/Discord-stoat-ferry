@@ -32,8 +32,9 @@ from discord_ferry.discord.metadata import (
     DiscordMetadata,
     PermissionPair,
     RoleMeta,
+    forum_group_key,
+    forum_key_table,
     forum_parent_ids,
-    is_forum_post,
     load_bound_discord_metadata,
 )
 from discord_ferry.discord.models import normalize_channel_position
@@ -1467,6 +1468,8 @@ async def run_channels(
     """
     discord_metadata = load_bound_discord_metadata(config, exports)
     forum_ids = forum_parent_ids(discord_metadata)
+    # One table per phase, so every forum gets the same key at every site (#1640).
+    forum_table = forum_key_table(discord_metadata, state, exports)
 
     # Snapshot already-mapped channels BEFORE the dedup scan so incremental
     # re-runs reuse carried Stoat IDs (no re-create) and the truncation budget
@@ -1480,6 +1483,8 @@ async def run_channels(
     existing_names: set[str] = set()
     # Forum categories: forum_cat_key -> forum display name (created lazily).
     forum_categories: dict[str, str] = {}
+    # forum_cat_key -> id of the first real forum that posted under it this run.
+    forum_key_owner: dict[str, str] = {}
 
     for export in exports:
         channel: DCEChannel = export.channel
@@ -1518,10 +1523,12 @@ async def run_channels(
         # For forum/media channel threads (type 15/16), use a dedicated forum
         # category keyed by parent name instead of the original Discord category.
         effective_cat_id = channel.category_id
-        if is_forum_post(export, forum_ids):
-            forum_cat_key = f"forum-{export.parent_channel_name}"
+        forum_cat_key = forum_group_key(export, forum_ids, forum_table, state.channel_categories)
+        if forum_cat_key is not None:
             if forum_cat_key not in forum_categories:
                 forum_categories[forum_cat_key] = export.parent_channel_name
+            if channel.category_id in forum_ids:
+                forum_key_owner.setdefault(forum_cat_key, channel.category_id)
             effective_cat_id = forum_cat_key
 
         approved_parent_id: str | None = None
@@ -1603,10 +1610,16 @@ async def run_channels(
         for forum_key, forum_name in forum_categories.items():
             # Incremental: reuse the carried Stoat category id (no new id) so the
             # forum category and its channels are not orphaned on re-run.
+            is_new_key = not state.category_map.get(forum_key)
             stoat_forum_id = state.category_map.get(forum_key) or _generate_category_id()
             state.category_map[forum_key] = stoat_forum_id
             state.category_names[forum_key] = forum_name
             state.forum_category_names[forum_key] = forum_name  # S15: track for REPORT rebuild
+            owner_id = forum_key_owner.get(forum_key)
+            if is_new_key and owner_id is not None:
+                # Same step as the category_map write, before any channel is filed, so a
+                # crash cannot leave a plain key whose owner nobody recorded (#1640).
+                state.forum_key_forums[forum_key] = [owner_id]
             on_event(
                 MigrationEvent(
                     phase="channels",
