@@ -10,7 +10,7 @@ import json
 import re
 import socket
 import uuid
-from collections.abc import Callable, Coroutine, Iterator
+from collections.abc import Callable, Coroutine, Iterator, Mapping
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -54,6 +54,8 @@ from discord_ferry.discord.metadata import (
     _bad_id,
     _capture_source_channel,
     _permission_source_fingerprint,
+    forum_group_key,
+    forum_key_table,
     forum_parent_ids,
     is_forum_post,
     validate_permission_source,
@@ -1968,7 +1970,11 @@ async def _prepare_permission_operation(
         if export.channel.type != 4 and not (config.skip_threads and export.is_thread)
     ]
     forum_ids = forum_parent_ids(meta)
-    indexes = _permission_index_sources(selected, state, forum_ids=forum_ids)
+    # The same table the channels phase builds from the same metadata, state and exports.
+    forum_table = forum_key_table(meta, state, exports)
+    indexes = _permission_index_sources(
+        selected, state, forum_ids=forum_ids, forum_table=forum_table
+    )
     destinations = set(state.channel_map)
     if mode == "migration":
         if config.thread_strategy in {"merge", "archive"} and any(e.is_thread for e in selected):
@@ -1981,8 +1987,9 @@ async def _prepare_permission_operation(
             if export.channel.id in candidates:
                 continue
             candidates[export.channel.id] = export
-            if is_forum_post(export, forum_ids):
-                new_indexes.add(f"forum-index-forum-{export.parent_channel_name}")
+            group = forum_group_key(export, forum_ids, forum_table, state.channel_categories)
+            if group is not None:
+                new_indexes.add(f"forum-index-{group}")
         carried = [e for sid, e in candidates.items() if sid in state.channel_map]
         future_channels = [e for sid, e in candidates.items() if sid not in state.channel_map]
         budget = max(0, config.max_channels - len(new_indexes) - len(carried))
@@ -2196,6 +2203,7 @@ def _permission_index_sources(
     state: MigrationState,
     *,
     forum_ids: frozenset[str] = frozenset(),
+    forum_table: Mapping[str, str] | None = None,
 ) -> dict[str, tuple[str, ...]]:
     """Cross-check complete actual source membership without changing saved identity."""
 
@@ -2224,7 +2232,7 @@ def _permission_index_sources(
         sid = export.channel.id
         if _bad_id("source channel", sid) is not None:
             refuse()
-        group = f"forum-{export.parent_channel_name}" if is_forum_post(export, forum_ids) else None
+        group = forum_group_key(export, forum_ids, forum_table or {}, state.channel_categories)
         if sid in selected and selected[sid] != group:
             refuse()
         selected[sid] = group
