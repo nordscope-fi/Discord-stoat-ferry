@@ -35,8 +35,19 @@ async def _drive(stack: Any, scope: dict[str, Any]) -> list[Message]:
     return sent
 
 
-def _scope(kind: str, host: str | None, path: str = "/") -> dict[str, Any]:
+def _scope(
+    kind: str,
+    host: str | None,
+    path: str = "/",
+    *,
+    origin: str | None = None,
+    method: str = "GET",
+    extra: tuple[tuple[bytes, bytes], ...] = (),
+) -> dict[str, Any]:
     headers = [] if host is None else [(b"host", host.encode())]
+    if origin is not None:
+        headers.append((b"origin", origin.encode()))
+    headers.extend(extra)
     scope: dict[str, Any] = {
         "type": kind,
         "asgi": {"version": "3.0"},
@@ -50,7 +61,7 @@ def _scope(kind: str, host: str | None, path: str = "/") -> dict[str, Any]:
         "scheme": "ws" if kind == "websocket" else "http",
     }
     if kind == "http":
-        scope["method"] = "GET"
+        scope["method"] = method
         scope["http_version"] = "1.1"
     else:
         scope["subprotocols"] = []
@@ -236,3 +247,79 @@ class TestGuardIsOutermost:
         monkeypatch.setattr(app, "user_middleware", [session])
         app.build_middleware_stack()
         assert app.user_middleware == [session]
+
+
+_FERRY = f"127.0.0.1:{gui._PORT}"
+_POLLING = "/_nicegui_ws/socket.io/"
+
+
+async def _drive_guard(scope: dict[str, Any]) -> tuple[list[Message], bool]:
+    reached: list[bool] = []
+
+    async def inner(scope: Any, receive: Any, send: Any) -> None:
+        reached.append(True)
+
+    sent = await _drive(gui._LoopbackHostGuard(inner), scope)
+    return sent, bool(reached)
+
+
+class TestOriginCheck:
+    """#1295: NiceGUI's live connection answers any Origin with credentialed CORS,
+    so the guard refuses a request a browser marks as coming from another site."""
+
+    @pytest.mark.parametrize("origin", ["https://evil.example", "null", "http://127.0.0.1:9999"])
+    @pytest.mark.parametrize(
+        ("method", "path", "extra"),
+        [
+            ("GET", _POLLING, ()),
+            ("OPTIONS", _POLLING, ((b"access-control-request-method", b"POST"),)),
+            ("GET", "/", ()),
+            ("POST", "/_nicegui/client/upload", ()),
+        ],
+    )
+    async def test_foreign_origin_http_is_refused(
+        self, origin: str, method: str, path: str, extra: tuple[tuple[bytes, bytes], ...]
+    ) -> None:
+        sent, reached = await _drive_guard(
+            _scope("http", _FERRY, path, origin=origin, method=method, extra=extra)
+        )
+        assert not reached
+        assert sent[0]["status"] == 400
+        assert sent[1]["body"] == b"Invalid origin header"
+        names = [key for key, _ in sent[0]["headers"]]
+        assert not [n for n in names if n.startswith(b"access-control-")]
+        assert b"set-cookie" not in names
+
+    @pytest.mark.parametrize("origin", ["https://evil.example", "null"])
+    async def test_foreign_origin_websocket_is_closed_before_accept(self, origin: str) -> None:
+        sent, reached = await _drive_guard(_scope("websocket", _FERRY, _POLLING, origin=origin))
+        assert not reached
+        assert [m["type"] for m in sent] == ["websocket.close"]
+
+    @pytest.mark.parametrize(
+        "origin",
+        [f"http://{h}" for h in sorted(gui._allowed_host_headers())]
+        + [f"HTTP://LOCALHOST:{gui._PORT}"],
+    )
+    @pytest.mark.parametrize("kind", ["http", "websocket"])
+    async def test_ferry_origin_passes(self, origin: str, kind: str) -> None:
+        _sent, reached = await _drive_guard(_scope(kind, _FERRY, _POLLING, origin=origin))
+        assert reached
+
+    async def test_no_origin_passes(self) -> None:
+        _sent, reached = await _drive_guard(_scope("http", _FERRY, "/"))
+        assert reached
+
+    async def test_ferry_origin_upload_passes(self) -> None:
+        _sent, reached = await _drive_guard(
+            _scope(
+                "http", _FERRY, "/_nicegui/client/upload", origin=f"http://{_FERRY}", method="POST"
+            )
+        )
+        assert reached
+
+    async def test_bad_host_still_names_the_host(self) -> None:
+        sent, _reached = await _drive_guard(
+            _scope("http", "evil.example", "/", origin="https://evil.example")
+        )
+        assert sent[1]["body"] == b"Invalid host header"

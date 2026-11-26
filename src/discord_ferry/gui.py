@@ -2636,8 +2636,13 @@ def _allowed_host_headers() -> frozenset[str]:
     return frozenset(value for name in names for value in (name.lower(), f"{name.lower()}:{_PORT}"))
 
 
+def _allowed_origins() -> frozenset[str]:
+    """Origins Ferry's own page and native window send: http plus an allowed Host."""
+    return frozenset(f"http://{host}" for host in _allowed_host_headers())
+
+
 class _LoopbackHostGuard:
-    """Reject any HTTP or websocket request whose Host is not a loopback name.
+    """Reject any HTTP or websocket request whose Host or Origin is not Ferry's own.
 
     DNS rebinding: a hostile site re-resolves its own name to 127.0.0.1, and the browser
     then sends requests to this listener with ``Host: evil.example:8765``. Binding to
@@ -2657,18 +2662,24 @@ class _LoopbackHostGuard:
             await self.app(scope, receive, send)
             return
         host = b""
+        origin: bytes | None = None
         for key, value in scope.get("headers", ()):
             if key == b"host":
                 host = value
-                break
-        if host.decode("latin-1").lower() in _allowed_host_headers():
+            elif key == b"origin":
+                origin = value
+        host_ok = host.decode("latin-1").lower() in _allowed_host_headers()
+        # No Origin: same-origin navigations and non-browser clients. `null` and any
+        # other site are refused (#1295): NiceGUI's Socket.IO server allows any origin.
+        origin_ok = origin is None or origin.decode("latin-1").lower() in _allowed_origins()
+        if host_ok and origin_ok:
             await self.app(scope, receive, send)
             return
         if kind == "websocket":
             # Closing before accept makes the server answer the handshake with a 403.
             await send({"type": "websocket.close", "code": 1008})
             return
-        body = b"Invalid host header"
+        body = b"Invalid host header" if not host_ok else b"Invalid origin header"
         await send(
             {
                 "type": "http.response.start",
