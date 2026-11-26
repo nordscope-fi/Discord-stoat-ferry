@@ -358,7 +358,7 @@ ferry rollback --output-dir <path> [OPTIONS]
 | `--output-dir PATH` | Directory containing the migration's `state.json` *(required)* |
 | `--stoat-url URL` | Stoat API base URL (or env `STOAT_URL`) *(required)* |
 | `--token TOKEN` | Stoat session token *(required)*. Prefer the `STOAT_TOKEN` environment variable |
-| `--server-id ID` | Override the Stoat server ID from `state.json` (rarely needed) |
+| `--server-id ID` | Stoat server ID, used only when the saved progress records none. A different ID is refused. |
 | `--yes` / `-y` | Skip the confirmation prompt and per-item opt-in for suspect channels |
 | `--force-unlock` | Override a stale `[FERRY_LOCK:...]` marker on the target server |
 | `--max-concurrent-requests INT` | Max concurrent channel DELETEs (default 5) |

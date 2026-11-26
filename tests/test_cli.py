@@ -1303,6 +1303,15 @@ def test_rollback_help(runner: CliRunner) -> None:
     assert "--force-unlock" in result.output
 
 
+def test_rollback_help_describes_server_id_truthfully(runner: CliRunner) -> None:
+    """#1678: --server-id never overrides the saved server; a different one is refused."""
+    result = runner.invoke(main, ["rollback", "--help"])
+    assert result.exit_code == 0
+    flat = " ".join(result.output.split())
+    assert "used only when the saved progress records none" in flat
+    assert "Override the Stoat server ID" not in flat
+
+
 def test_rollback_missing_state_file(runner: CliRunner, tmp_path: Path) -> None:
     """SC-32: empty output dir → exit code 2, error message about state.json."""
     result = runner.invoke(
