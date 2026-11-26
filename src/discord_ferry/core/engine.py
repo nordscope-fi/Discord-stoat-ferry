@@ -5317,9 +5317,22 @@ def _validate_rollback_inputs(state: MigrationState, config: FerryConfig) -> str
     falling back to ``config.server_id``).
 
     Raises:
-        MigrationError: If neither is populated.
+        MigrationError: If neither is populated, or if ``config.server_id`` names a
+            different server from ``state.stoat_server_id``.
     """
-    server_id = state.stoat_server_id or (config.server_id or "")
+    saved_server = state.stoat_server_id
+    if config.server_id and saved_server and config.server_id != saved_server:
+        # #1678: --server-id used to be ignored here, so rollback acted on the saved
+        # server while the user had named another one. Refuse, like #1653 for resume.
+        raise MigrationError(
+            _safe(
+                config,
+                f"The saved progress in {config.output_dir} belongs to Stoat server "
+                f"'{saved_server}', but --server-id is '{config.server_id}'. Run "
+                "without --server-id (or with the saved id) to roll back that migration.",
+            )
+        )
+    server_id = saved_server or (config.server_id or "")
     if not server_id:
         raise MigrationError(
             "Cannot run rollback: no Stoat server ID recorded in state.json "
