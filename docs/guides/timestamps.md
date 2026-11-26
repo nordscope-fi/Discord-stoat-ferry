@@ -6,7 +6,7 @@ When you migrate a Discord server to Stoat, you will notice that every message s
 
 ## Why Timestamps Change
 
-Stoat uses [ULIDs](https://github.com/ulid/spec) as message IDs. A ULID encodes the creation time in its first 48 bits — when Stoat creates a message, the current server time is baked into the ID automatically. There is no API parameter to override this.
+Stoat uses [ULIDs](https://github.com/ulid/spec) as message IDs. A ULID encodes the creation time in its first 48 bits. When Stoat creates a message, the current server time is baked into the ID automatically. There is no API parameter to override this.
 
 During migration, Ferry sends messages one at a time through the Stoat API. Each message receives a ULID reflecting the moment it was created on the Stoat server, not the moment it was originally posted on Discord. This is a Stoat platform limitation, not a Discord Ferry limitation.
 
@@ -20,7 +20,7 @@ To keep the original timeline visible, Ferry prepends every migrated message wit
 *[2024-01-15 12:00 UTC]*
 ```
 
-This prefix is italic markdown, visible to all users in any Stoat client. Messages maintain their original chronological order within each channel — they are sent in the same sequence they appeared on Discord. The prefix uses UTC to avoid timezone ambiguity across communities.
+This prefix is italic markdown, visible to all users in any Stoat client. Messages maintain their original chronological order within each channel: they are sent in the same sequence they appeared on Discord. The prefix uses UTC to avoid timezone ambiguity across communities.
 
 ---
 
@@ -40,13 +40,13 @@ JaneDoe                       just now
 *[2024-01-15 12:00 UTC]* Hey everyone, welcome to the server!
 ```
 
-The author name and avatar are preserved through Stoat's masquerade feature — each message appears under the original Discord author's display name and profile picture. The "just now" timestamp shown by the Stoat client is the migration time, not the original posting time. The italic prefix is the only reliable indicator of when the message was actually written.
+The author name and avatar are preserved through Stoat's masquerade feature, so each message appears under the original Discord author's display name and profile picture. The "just now" timestamp shown by the Stoat client is the migration time, not the original posting time. The italic prefix is the only reliable indicator of when the message was actually written.
 
 ---
 
 ## Self-Hosted Workaround: True Timestamp Preservation
 
-!!! warning "Advanced — unsupported"
+!!! warning "Advanced, unsupported"
     This section is for admins who run their own Stoat instance and are comfortable working directly with MongoDB. This approach bypasses the Stoat API entirely. It is not officially supported by the Stoat project and carries real risk of data corruption. **Always back up your database before attempting this.**
 
 If you operate your own Stoat instance and need messages to display their original timestamps natively (without the italic prefix), you can insert messages directly into the database with custom ULIDs.
@@ -113,7 +113,7 @@ Without this step, messages will appear in the database but connected clients wi
 ### Risks and limitations
 
 !!! danger "Read this before proceeding"
-    - This approach **bypasses all API validation**. Malformed fields will not be caught on insert — they will surface as broken messages or client errors later.
+    - This approach **bypasses all API validation**. Malformed fields will not be caught on insert. They will surface as broken messages or client errors later.
     - There is a **real risk of data corruption** if documents are structured incorrectly.
     - The Stoat project provides **no official support** for direct database manipulation. You are on your own.
     - **Future Stoat updates may change the database schema**, breaking any tooling you build around direct inserts.

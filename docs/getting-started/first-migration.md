@@ -32,7 +32,7 @@ Before you start, confirm you have these ready:
 
 === "GUI (Windows / macOS)"
 
-    1. Double-click **Ferry.exe** (Windows) or open **Ferry.app** (macOS).
+    1. Double-click **Ferry-windows-x86_64.exe** (Windows) or open **Ferry.app** (macOS).
     2. Ferry opens its own window. No browser is launched.
     3. You will see the Setup screen.
 
@@ -119,7 +119,7 @@ Before you start, confirm you have these ready:
     If `DISCORD_TOKEN` is set in the environment, Ferry ignores it in
     offline mode and prints a note. Passing `--discord-token` with `--export-dir` remains an error.
 
-    Additional flags:
+    Additional flags (the full list is in the [CLI Reference](../guides/cli-reference.md)):
 
     | Flag | Effect |
     |------|--------|
@@ -134,7 +134,8 @@ Before you start, confirm you have these ready:
     | `--max-emoji N` | Emoji limit (default `100`; raise for self-hosted) |
     | `--thread-strategy` | `flatten` (default), `merge`, or `archive` |
     | `--incremental` | Delta migration, only new messages since last run |
-    | `--force` | Override freshness and soft error checks |
+    | `--force` | Override freshness and other soft errors |
+    | `--output-dir PATH` | Where reports and the state file are written (default `./ferry-output`) |
     | `--verify-uploads` | Compare requested media IDs with attachment and embed-media IDs on the delivered message. A mismatch keeps the delivered message and records a diagnostic. This does not compare original bytes or download, reupload, or resend files. |
     | `--cleanup-orphans` | Report unreferenced Autumn uploads |
     | `--force-unlock` | Clear a stale migration lock, or continue when Ferry cannot take one |
@@ -145,7 +146,7 @@ Before you start, confirm you have these ready:
     | `--max-concurrent-channels N` | Channels processed in parallel (default 3; self-hosted only) |
     | `--max-concurrent-requests N` | Concurrent API calls across all channel workers (default 5) |
     | `--skip-avatars` | Skip the avatar pre-flight phase (avatars still upload on demand) |
-    | `--validate-after` | After migration, compare live server counts with what was migrated |
+    | `--validate-after` | After migration, verify every channel, role, category and emoji by ID (same as `ferry check`; results in `state.json`) |
     | `--yes` / `-y` | Skip the terms-of-service confirmation prompt (for scripted runs) |
 
 ---
@@ -178,8 +179,7 @@ Ferry checks your export files locally before making any API calls. Nothing is s
 
 === "GUI (Windows / macOS)"
 
-    1. Click **Validate Export**.
-    2. Ferry parses all files and displays:
+    1. Ferry opens the Validate screen on its own and parses all files. It shows:
         - Server name and export date
         - Counts: channels, messages, attachments, emoji
         - Warnings (amber) for any issues it finds
@@ -191,8 +191,8 @@ Ferry checks your export files locally before making any API calls. Nothing is s
     !!! info "What amber warnings mean"
         Amber warnings are not blockers. Common examples: some attachments were not downloaded with the export, or some message types will be skipped. Ferry will still proceed, check the details so you know what to expect.
 
-    3. If the status is green or amber, click **Start Migration** to continue.
-    4. If the status is red, the export is missing required data. Return to the export guide and re-export with the correct flags.
+    2. If the status is green or amber, click **Start Migration** to continue.
+    3. If the status is red, the export is missing required data. Return to the export guide and re-export with the correct flags.
 
 === "CLI (Linux / advanced)"
 
@@ -326,7 +326,7 @@ After a successful migration:
 
 === "GUI (Windows / macOS)"
 
-    Reopen Ferry. On the Setup screen, check **Resume previous migration** and click **Start**. Ferry picks up from the last checkpoint.
+    Reopen Ferry and start the migration again with the same output folder. A **Previous migration found** card appears. Click **Resume** and Ferry picks up from the last checkpoint. **Start Fresh** ignores the saved progress instead.
 
 === "CLI (Linux / advanced)"
 

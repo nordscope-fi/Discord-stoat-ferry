@@ -39,7 +39,7 @@ New to Stoat? [Create a free account](https://stoat.chat/app) or [self-host your
 
 ### Step 1: Enter your credentials
 
-Launch Ferry. You'll need four things:
+Launch Ferry. You'll need three things:
 
 - **Discord user token** + **server ID**, a token is a secret key that lets Ferry access your account. Ferry shows you how to find both.
 - **Stoat API URL**, the web address Ferry uses to talk to Stoat. Use `https://api.stoat.chat` for the official service. With the official self-hosting kit, use your domain followed by `/api`, such as `https://chat.example.com/api`.
@@ -93,7 +93,7 @@ Ferry can **pause and resume**, close it anytime, pick up where you left off.
 | Embeds | Flattened to Stoat format with thumbnails and images uploaded |
 | Polls | Active polls are unavailable; closed-poll notifications keep DCE's fallback text and embeds |
 | Threads | Converted to text channels, merged into parent, or archived as markdown, your choice |
-| Forum posts | Grouped into dedicated categories with an index channel |
+| Forum posts | Placed in their forum's category, with an index channel and a "Forum post" header on each post |
 | Voice channels | Created, but may not work yet (known Stoat bug) |
 | Stickers | Image uploaded, or text fallback for animated/missing |
 | Server banner | Uploaded from Discord API when a Discord token is provided |

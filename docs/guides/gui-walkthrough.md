@@ -37,7 +37,7 @@ In this mode, Ferry downloads and runs the Discord server export tool, DiscordCh
 
 Toggle **"I already have exports"** to switch to offline mode. The Discord token and server ID fields are replaced with:
 
-**Export folder**, paste or browse to your DCE export folder. The folder should contain one or more `.json` files and a `media/` subfolder.
+**Export folder path**, paste or browse to your DCE export folder. The folder should contain one or more `.json` files and a `media/` subfolder.
 
 !!! warning "Media folder required"
     If you exported without the `--media` flag, attachments will not migrate. Re-export with `--media` before continuing.
@@ -58,7 +58,7 @@ Click **Advanced Options** to expand the following settings. Defaults are safe f
 | Existing server ID | *(empty)* | Paste a Stoat server ID to migrate into a server you have already created, rather than creating a new one. |
 | Server name | *(empty)* | Name for the new Stoat server. Defaults to the Discord server's name. |
 
-Below these, three labelled groups hold the tuning settings (since v2.7.0):
+Below these, three labelled groups hold the tuning settings:
 
 **Speed**
 
@@ -81,7 +81,7 @@ Below these, three labelled groups hold the tuning settings (since v2.7.0):
 | Option | Default | Description |
 |--------|---------|-------------|
 | Checkpoint interval | 50 | How often migration state is saved (every N messages). Lower = safer but more disk I/O. |
-| Validate after migration | Off | After migration, fetch the server and compare channel/role counts against expectations. |
+| Validate after migration | Off | After migration, verify every channel, role, category and emoji by ID (same as `ferry check`; results in `state.json`). |
 | Incremental | Off | Reuse a prior migration and send new messages. Ferry requests a shorter export only after it proves current coverage; otherwise it runs a full export. Cannot be combined with Resume. |
 | Force unlock | Off | Continue when Ferry cannot take the server lock, and override a stale lock. Applies to the next run only. |
 
@@ -120,7 +120,7 @@ The server name and export date from the DCE export appear at the top of the scr
 
 Any issues found during parsing are listed. Amber entries are informational. A red entry needs your acknowledgement before the migration can start. Common warnings:
 
-- **Mentions written as plain text** (red). One entry per channel, carrying a count: those messages have mentions written as plain text instead of raw IDs, so they will arrive as text, with no link back to the user. See [Mentions written as plain text](troubleshooting.md#mentions-written-as-plain-text) for what to do about it.
+- **Mentions written as plain text** (red). One entry per export file, carrying a count: those messages have mentions written as plain text instead of raw IDs, so they will arrive as text, with no link back to the user. See [Mentions written as plain text](troubleshooting.md#mentions-written-as-plain-text) for what to do about it.
 - **Attachment files missing**, one or more attachment files were not found locally. Those files will be skipped.
 - **Channel limit may be exceeded**, the combined channel and thread count exceeds 200.
 - **Emoji limit will be reached**, the server has more than 100 custom emoji. Only the first 100 will be migrated.
@@ -200,9 +200,11 @@ The dialog displays a summary table:
 | Roles | Number of roles to create (excluding @everyone) |
 | Categories | Number of channel categories |
 | Channels | Number of text and voice channels |
-| Custom emoji | Number of emoji to upload |
+| Emoji | Number of emoji to upload |
 | Messages | Total messages to migrate |
 | Threads | Number of threads/forum posts |
+| Permissions | Whether Discord permissions will be applied (Yes or No) |
+| NSFW Channels | Number of age-restricted channels (shown only when there are any) |
 
 ### Warnings
 
@@ -269,16 +271,19 @@ move, replace, or delete those files.
 
 ### Progress Bar
 
-During the **Messages** phase, a per-channel progress bar shows how many messages have been sent in the current channel and how many remain. In v2.0.0+, up to 3 channels are processed concurrently by default, the progress bar reflects the active channel workers simultaneously.
+During the **Messages** phase, a per-channel progress bar shows how many messages have been sent in the current channel and how many remain. Up to 3 channels are processed concurrently by default, so the progress bar reflects the active channel workers simultaneously.
 
 ### Running Totals
 
 A live counter in the top-right area shows:
 
-- **Messages sent**, total messages delivered to Stoat
-- **Attachments uploaded**, files successfully uploaded to Stoat's file storage
+- **Verified**, messages Ferry confirmed were delivered
+- **Partial**, messages delivered with part of their content missing
+- **Unresolved**, messages whose delivery Ferry could not confirm
+- **Failed records**, messages still recorded as failed (the **Retry** tool resends them)
 - **Errors**, messages or items that could not be migrated
 - **Warnings**, non-fatal issues logged
+- **ETA**, the estimated time remaining
 
 ### Live Log Stream
 
@@ -286,7 +291,7 @@ The lower half of the screen shows a scrolling log of activity. The log auto-scr
 
 ### ETA Countdown
 
-A live estimate of time remaining updates as messages are sent.
+The **ETA** label at the right of the totals updates as messages are sent.
 
 ### Pause / Resume
 
@@ -334,3 +339,27 @@ Rollback is idempotent, if it's interrupted, just click the button again and it 
     Uploaded attachments, avatars, and emoji images remain on Stoat's Autumn file store, Autumn has no public DELETE endpoint. The rollback summary reports the orphan count. The Stoat server itself is never deleted; rollback only removes what Ferry created inside it.
 
 The same operation is available on the CLI as `ferry rollback --output-dir <path>`, see the [CLI reference](cli-reference.md#ferry-rollback) for full options.
+
+### Verify and Repair
+
+The completion card also has **Verify** and **Repair** buttons. Each opens the matching tool page (see [Tools](#tools)) with this migration's output folder already filled in. **Verify** runs a check and **Repair** recreates what the check found missing. The CLI equivalents are [`ferry check`](cli-reference.md#ferry-check) and [`ferry repair`](cli-reference.md#ferry-repair).
+
+---
+
+## Tools
+
+Besides the migration wizard, the GUI has a set of tool pages. Open `/tools` in the app (for example `http://localhost:8765/tools` in a browser) to see the landing page, which lists every tool with a one-line description. Each tool is the GUI form of a command-line command, so the CLI reference covers the same options.
+
+| Tool | What it does | Inputs | CLI equivalent |
+|------|--------------|--------|----------------|
+| **Check** | Verifies a finished migration against the live Stoat server and shows a verdict plus a per-item table | Stoat API URL, output directory | [`ferry check`](cli-reference.md#ferry-check) |
+| **Repair** | Runs the check, then recreates what is missing and resends the messages a recreated channel held | Stoat API URL, output directory, original export directory, a **Dry run** box (ticked by default) | [`ferry repair`](cli-reference.md#ferry-repair) |
+| **Retry** | Resends the messages that failed during a migration | Stoat API URL, output directory, original export directory | [`ferry retry`](cli-reference.md#ferry-retry) |
+| **Probe** | Tests a live Stoat instance for file-size limits, the rate window, voice and webhooks before you migrate. The optional **Deep probe** uploads test files and leaves them behind in Stoat's file storage, so it needs a confirmation box | Stoat API URL, a throwaway test server ID | [`ferry probe`](cli-reference.md#ferry-probe) |
+| **Blueprint export** | Turns a DCE export into a reusable server blueprint file | Export directory, output path, optional server name and metadata file, an overwrite box | [`ferry export-blueprint`](cli-reference.md#ferry-export-blueprint) |
+| **Build** | Builds a Stoat server from a preset template or a blueprint file | Stoat API URL, a template or a blueprint file, optional server name | [`ferry build`](cli-reference.md#ferry-build) |
+| **Validate** | Checks an export before you migrate and lists any warnings. Nothing is sent to Stoat | Export directory | [`ferry validate`](cli-reference.md#ferry-validate) |
+| **Stats** | Summarises a past migration from its state file. It reads local files only and needs no token | Output directory | [`ferry stats`](cli-reference.md#ferry-stats) |
+| **TLS check** | Shows which certificate authorities Ferry trusts and the proxy state | None | [`ferry tls-check`](cli-reference.md#ferry-tls-check) |
+
+Tools that talk to Stoat need your Stoat token. If you are still signed in from the wizard, the page reuses that token. Otherwise it shows a token field.

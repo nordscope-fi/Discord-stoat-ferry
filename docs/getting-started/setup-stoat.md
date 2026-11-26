@@ -103,10 +103,8 @@ Ferry will create a brand-new Stoat server, set up all the channels and roles, a
 If you have already created an empty server in Stoat and want Ferry to populate it (for example, because you set a custom name and icon manually, or because your migration account is not the one you want to own the server), you can tell Ferry which server to use.
 
 To find your server's ID, enable **Advanced** settings in Stoat, right-click the server name, and
-choose **Copy server ID**. Ferry's 2026-10-11 gap analysis records the Stoat UI source as
-`<Trans>Copy server ID</Trans>`. The analysis confirms that it is inside this context menu after
-Advanced is enabled. In the GUI, enter this in the **Existing Server ID** field under Advanced
-Options. On the command line, pass it with the `--server-id` option.
+choose **Copy server ID**. In the GUI, enter this in the **Existing server ID (optional)** field
+under Advanced Options. On the command line, pass it with the `--server-id` option.
 
 !!! info "Using `--server-id` with a non-owner account"
     If the account running Ferry did not create the server, make sure it has been given a role with all required permissions before you start. See the next section for the list. Ferry will verify the server is accessible during the CONNECT phase and warn you if it cannot reach it.

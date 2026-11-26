@@ -224,9 +224,8 @@ inheritance stop the operation. `--skip-threads` can exclude threads; merge and 
 ways around the access check. Ferry does not add helper roles or assign members to migrated roles.
 
 Generated indexes require complete source evidence and the same exact access for every indexed
-channel. Mixed or unknown access stops the operation. Normal DCE forum-post exports do not
-currently produce a supported generated forum index; [#1217](https://github.com/nordscope-fi/Discord-stoat-ferry/issues/1217)
-tracks the routing and source-evidence correction. This release does not assume that thread
+channel. Mixed or unknown access stops the operation. Forum posts from DCE exports are recognised
+as forum posts since 3.6.4 and get a generated forum index. Ferry does not assume that thread
 access equals parent-channel access.
 
 Migration reports and Repair JSON include a permission outcome with its own schema version 1:

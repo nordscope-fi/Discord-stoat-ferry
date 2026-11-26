@@ -129,15 +129,15 @@ mongodump --uri="mongodb://localhost:27017" --db=revolt --out=/path/to/backup
 
 ## 10. Check Stoat account age (official hosted service)
 
-Ensure the Stoat account you are using was created at least **72 hours ago**.
+Use a Stoat account that is not brand new.
 
-**Why:** Stoat may apply stricter rate limits to accounts less than 72 hours old. A new account could hit unexpected throttling during migration, slowing the process significantly or causing failures.
+**Why:** Stoat may apply stricter limits to newly created accounts. A new account could hit unexpected throttling during migration, which slows the run or causes failures.
 
 ---
 
 ## 11. Review your options before running
 
-Ferry 2.0 adds several options. Decide which apply to your migration before you start:
+These options are available. Decide which apply to your migration before you start:
 
 **CLI flags. The GUI provides a subset of these options:**
 
@@ -155,7 +155,7 @@ Ferry 2.0 adds several options. Decide which apply to your migration before you 
 | `--max-concurrent-channels N` / `--max-concurrent-requests N` | Parallelism during message migration | Raise only on self-hosted instances with relaxed rate limits |
 | `--checkpoint-interval N` | How often state is saved (every N messages, but at most once per 5 seconds) | Raise to ~200 for very large migrations to reduce disk I/O |
 | `--skip-avatars` | Skip the avatar pre-flight phase | Avatars still upload on demand during messages |
-| `--validate-after` | Post-migration count comparison | Use when you want an automatic sanity check of the result |
+| `--validate-after` | After migration, verifies every channel, role, category and emoji by ID (same as `ferry check`) | Use when you want an automatic sanity check of the result |
 
 **Why:** Choosing the wrong thread strategy or omitting `--incremental` on a second run will duplicate messages or create an unexpected channel structure. Decide before starting. These options cannot be changed mid-migration.
 
@@ -174,7 +174,7 @@ Copy this condensed checklist for quick use:
 - [ ] Private channels identified; Discord token ready if needed
 - [ ] Per-member overrides planned (single-user roles created)
 - [ ] MongoDB backed up (self-hosted only)
-- [ ] Stoat account is older than 72 hours (official service only)
+- [ ] Stoat account is not brand new (official service only)
 - [ ] Migration options reviewed (thread strategy, incremental mode, reaction mode, concurrency)
 
 ---

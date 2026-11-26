@@ -14,7 +14,7 @@ One-click app for Windows and Mac. Command-line interface for Linux. No coding r
 2. **[Set up Stoat](getting-started/setup-stoat.md)**, find your Stoat API URL (the address Ferry uses to connect) and user token (a secret key your browser saves when you log in, no bot or app creation needed). New to Stoat? [Create a free account](https://stoat.chat/app).
 3. **[Run your first migration](getting-started/first-migration.md)**, enter your Discord and Stoat credentials, click Migrate
 
-Already have DiscordChatExporter (DCE) exports? See [Offline Migration](getting-started/export-discord.md) to skip the export step.
+Already have DiscordChatExporter (DCE) exports? See [Export Your Discord Server](getting-started/export-discord.md) to skip the export step.
 
 ---
 
@@ -53,7 +53,7 @@ Ferry can **pause and resume**, close it anytime and pick up where you left off.
 | Embeds | Flattened to Stoat format with thumbnails and images uploaded |
 | Polls | Active polls are unavailable; closed-poll notifications keep DCE's fallback text and embeds |
 | Threads | Converted to text channels, merged into parent, or archived as markdown, your choice |
-| Forum posts | Grouped into dedicated categories with an index channel |
+| Forum posts | Placed in their forum's category, with an index channel and a "Forum post" header on each post |
 | Voice channels | Created, but may not work yet (known Stoat bug) |
 | Stickers | Image uploaded, or text fallback for animated/missing |
 | Server banner | Uploaded from Discord API when a Discord token is provided |

@@ -24,7 +24,7 @@ Pick your operating system below to get started.
     <!-- screenshot: windows-smartscreen-warning -->
 
     !!! warning "Windows SmartScreen warning"
-        Windows may show a blue dialog saying **"Windows protected your PC"**. This happens because Ferry is not signed with a paid code-signing certificate — a common situation for open-source tools.
+        Windows may show a blue dialog saying **"Windows protected your PC"**. This happens because Ferry is not signed with a paid code-signing certificate, a common situation for open-source tools.
 
         To proceed:
 
@@ -39,7 +39,7 @@ Pick your operating system below to get started.
 
     | What you see | Download this file |
     |---|---|
-    | **Chip:** Apple M1 / M2 / M3 / M4 | `Ferry-macos-arm64.zip` |
+    | **Chip:** Apple M1 and later | `Ferry-macos-arm64.zip` |
     | **Processor:** Intel | `Ferry-macos-x86_64.zip` |
 
     !!! warning "Needs macOS 15 Sequoia or later"
@@ -55,7 +55,7 @@ Pick your operating system below to get started.
     2. Under the latest release, click the file that matches your Mac.
     3. Unzip the downloaded file.
     4. Drag the **Ferry.app** icon into your **Applications** folder.
-    5. Double-click **Ferry.app**. macOS blocks it the first time. This is expected — keep reading.
+    5. Double-click **Ferry.app**. macOS blocks it the first time. This is expected, so keep reading.
 
     <!-- screenshot: macos-gatekeeper-warning -->
 
@@ -92,7 +92,7 @@ Pick your operating system below to get started.
 
 === "Linux"
 
-    Ferry is distributed as a Python package on Linux. You will need a terminal (the text command window — search "Terminal" in your applications) and **Python 3.11 or newer**.
+    Ferry is distributed as a Python package on Linux. You will need a terminal (the text command window; search "Terminal" in your applications) and **Python 3.11 or newer**.
 
     1.  Install **pipx** (a tool for safely installing Python programs) if you do not have it already:
 
@@ -134,9 +134,9 @@ Pick your operating system below to get started.
 
 ## Troubleshooting
 
-**Antivirus blocks Ferry.exe (Windows)**
+**Antivirus blocks Ferry-windows-x86_64.exe (Windows)**
 
-PyInstaller (the packaging tool used to create Ferry's single `.exe` file) can trigger false positives in some antivirus programs. The file is safe. Add `Ferry.exe` to your antivirus exclusions list, then try running it again. If you are unsure how to do this, search for "add exclusion" along with the name of your antivirus software.
+PyInstaller (the packaging tool used to create Ferry's single `.exe` file) can trigger false positives in some antivirus programs. The file is safe. Add `Ferry-windows-x86_64.exe` to your antivirus exclusions list, then try running it again. If you are unsure how to do this, search for "add exclusion" along with the name of your antivirus software.
 
 **macOS says "Ferry is damaged and can't be opened"**
 
