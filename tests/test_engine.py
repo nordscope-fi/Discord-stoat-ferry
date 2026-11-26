@@ -12695,3 +12695,84 @@ async def test_dependent_role_repair_does_not_complete_a_declined_channel_propos
     assert not outcome.permissions.verified
     assert outcome.permissions.reason == "unverified"
     assert not any(event.status == "completed" for event in events)
+
+
+# --- #1201: the migration lock never pushes the description past Stoat's cap ---
+
+_LOCK_HOST = "h"  # marker "[FERRY_LOCK:<10 digits>:h]" is 25 chars; with the space, 26
+_LOCK_FIT = 1024 - 26
+
+
+@pytest.mark.parametrize("unit", ["a", "\N{CRAB}"])
+async def test_lock_written_at_exact_cap(tmp_path: Path, unit: str) -> None:
+    """SC-2.1, SC-2.3: the longest description that fits is locked at exactly 1024."""
+    import aiohttp
+
+    from discord_ferry.core.engine import _acquire_migration_lock
+
+    config = _make_config(tmp_path, server_id="srv-001")
+    with (
+        patch("discord_ferry.core.engine.socket.gethostname", return_value=_LOCK_HOST),
+        patch(
+            "discord_ferry.core.engine.api_fetch_server",
+            return_value={"description": unit * _LOCK_FIT},
+        ),
+        patch("discord_ferry.core.engine.api_edit_server") as mock_edit,
+    ):
+        async with aiohttp.ClientSession() as session:
+            acquired = await _acquire_migration_lock(
+                config, MigrationState(), session, lambda e: None
+            )
+    assert acquired is True
+    assert len(mock_edit.call_args.kwargs["description"]) == 1024
+
+
+@pytest.mark.parametrize("unit", ["a", "\N{CRAB}"])
+async def test_lock_not_written_one_over_cap(tmp_path: Path, unit: str) -> None:
+    """SC-2.2, SC-2.3: one character more writes nothing and names the limit."""
+    import aiohttp
+
+    from discord_ferry.core.engine import _acquire_migration_lock
+
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, server_id="srv-001")
+    with (
+        patch("discord_ferry.core.engine.socket.gethostname", return_value=_LOCK_HOST),
+        patch(
+            "discord_ferry.core.engine.api_fetch_server",
+            return_value={"description": unit * (_LOCK_FIT + 1)},
+        ),
+        patch("discord_ferry.core.engine.api_edit_server") as mock_edit,
+    ):
+        async with aiohttp.ClientSession() as session:
+            acquired = await _acquire_migration_lock(
+                config, MigrationState(), session, events.append
+            )
+    assert acquired is False
+    mock_edit.assert_not_called()
+    # The message names the limit and never echoes the owner's description text.
+    assert any("1024" in e.message and unit * 20 not in e.message for e in events)
+
+
+async def test_expired_marker_stripped_before_cap_check(tmp_path: Path) -> None:
+    """SC-2.4: an expired marker does not count against the cap."""
+    import aiohttp
+
+    from discord_ferry.core.engine import _acquire_migration_lock
+
+    old = "[FERRY_LOCK:1000000000:old-host]"
+    config = _make_config(tmp_path, server_id="srv-001")
+    with (
+        patch("discord_ferry.core.engine.socket.gethostname", return_value=_LOCK_HOST),
+        patch(
+            "discord_ferry.core.engine.api_fetch_server",
+            return_value={"description": "a" * _LOCK_FIT + " " + old},
+        ),
+        patch("discord_ferry.core.engine.api_edit_server") as mock_edit,
+    ):
+        async with aiohttp.ClientSession() as session:
+            acquired = await _acquire_migration_lock(
+                config, MigrationState(), session, lambda e: None
+            )
+    assert acquired is True
+    assert len(mock_edit.call_args.kwargs["description"]) == 1024

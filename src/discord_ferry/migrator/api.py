@@ -41,6 +41,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAX_API_RETRIES = 3
+# Stoat validates server descriptions with length(max = 1024), counted in Unicode
+# scalar values (validator 0.16.1 `chars().count()`), the same unit as Python len().
+SERVER_DESCRIPTION_MAX_CHARS = 1024
 MessageRecovery = Callable[[MessageSendFailure], Awaitable[dict[str, Any]]]
 SlowmodeWait = Callable[[int], Awaitable[None]]
 _RETRYABLE_STATUSES = {429, 502, 503, 504}
