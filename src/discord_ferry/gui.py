@@ -1060,6 +1060,13 @@ def setup_page() -> None:
                         "Incremental (reuse channels and roles, send only new messages)",
                         value=adv_stored["incremental"],
                     )
+                    force_unlock_cb = ui.checkbox(
+                        "Force unlock (continue even if the server lock cannot be taken; "
+                        "this run only)",
+                        # Always starts unticked: a value left by an abandoned run
+                        # must not carry the override into the next one.
+                        value=False,
+                    )
 
                 error_label = ui.label("").classes("text-red-500 text-sm")
 
@@ -1134,6 +1141,7 @@ def setup_page() -> None:
                     storage["skip_avatars"] = skip_avatars_cb.value
                     storage["validate_after"] = validate_after_cb.value
                     storage["incremental"] = incremental_cb.value
+                    storage["force_unlock"] = bool(force_unlock_cb.value)
                     storage["skip_export"] = mode == "offline"
 
                     adv_chosen = _coerce_advanced_settings(storage)
@@ -1783,6 +1791,7 @@ async def migrate_page() -> None:
         skip_export=True,  # Export already done by this point (via /export or offline mode)
         discord_token=app.storage.tab.get("discord_token") or None,
         discord_server_id=storage.get("discord_server_id") or None,
+        force_unlock=bool(storage.get("force_unlock", False)),
         **_coerce_advanced_settings(storage),
     )
 
@@ -2359,6 +2368,9 @@ async def migrate_page() -> None:
                 # disconnected client (the token is memory-only — never on disk).
                 with contextlib.suppress(Exception):
                     _clear_tokens(app.storage.tab, _SESSION_TOKEN_KEYS)
+                # Force unlock lasts one run: clear it from the persisted user store.
+                with contextlib.suppress(Exception):
+                    storage.pop("force_unlock", None)
 
     task = background_tasks.create(_run())
 
