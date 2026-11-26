@@ -12979,3 +12979,101 @@ async def test_incremental_lock_stop_leaves_saved_state_unchanged(tmp_path: Path
     ):
         await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
     assert (tmp_path / "state.json").read_bytes() == before
+
+
+# --- #1653: refuse saved progress reused against a different server ---
+
+
+def _saved_progress(tmp_path: Path, server_id: str, **fields: object) -> bytes:
+    from discord_ferry.state import save_state
+
+    state = MigrationState(stoat_server_id=server_id, **fields)  # type: ignore[arg-type]
+    save_state(state, tmp_path)
+    return (tmp_path / "state.json").read_bytes()
+
+
+@pytest.mark.parametrize("mode", ["incremental", "resume"])
+@pytest.mark.parametrize("dry_run", [False, True])
+async def test_mismatched_server_reuse_refused_before_any_write(
+    tmp_path: Path, mode: str, dry_run: bool
+) -> None:
+    """SC-1.1, SC-1.2, SC-1.4, SC-2.1, SC-3.5."""
+    saved, requested = valid_stoat_id(5), valid_stoat_id(9)
+    extra: dict[str, object] = {"current_phase": "messages"} if mode == "resume" else {}
+    before = _saved_progress(tmp_path, saved, **extra)
+    fetch, edit, delete = AsyncMock(), AsyncMock(), AsyncMock()
+    ran: list[str] = []
+
+    async def _phase(*_a: object, **_k: object) -> None:
+        ran.append("phase")
+
+    config = _make_config(tmp_path, server_id=requested, dry_run=dry_run, **{mode: True})
+    with (
+        patch("discord_ferry.core.engine.api_fetch_server", fetch),
+        patch("discord_ferry.core.engine.api_edit_server", edit),
+        patch("discord_ferry.migrator.structure.api_delete_channel", delete),
+        pytest.raises(MigrationError) as caught,
+    ):
+        await run_migration(
+            config, lambda e: None, phase_overrides={n: _phase for n in _NOOP_OVERRIDES}
+        )
+    text = str(caught.value)
+    assert saved in text
+    assert requested in text
+    assert "--server-id" in text
+    assert "new output folder" in text
+    assert "test-token" not in text
+    assert ran == []
+    for mock in (fetch, edit, delete):
+        mock.assert_not_awaited()
+    assert (tmp_path / "state.json").read_bytes() == before
+
+
+async def test_1653_reproduction_sends_no_delete(tmp_path: Path) -> None:
+    """SC-1.3: saved progress from server A, --server-id B, no DELETE reaches Stoat."""
+    _saved_progress(tmp_path, valid_stoat_id(5), default_channel_ids=[valid_stoat_id(1)])
+    config = _make_config(tmp_path, server_id=valid_stoat_id(9), incremental=True)
+    with (
+        aioresponses() as m,
+        pytest.raises(MigrationError, match="belongs to Stoat server"),
+    ):
+        await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert [u for (meth, u) in m.requests if meth == "DELETE"] == []
+
+
+async def test_v1_progress_only_writes_its_local_backup(tmp_path: Path) -> None:
+    """SC-2.2: oldest-format progress leaves only its local safety copy behind."""
+    raw = {
+        "version": 1,
+        "stoat_server_id": valid_stoat_id(5),
+        "last_completed_channel": "",
+    }
+    (tmp_path / "state.json").write_text(json.dumps(raw), encoding="utf-8")
+    before = (tmp_path / "state.json").read_bytes()
+    config = _make_config(tmp_path, server_id=valid_stoat_id(9), incremental=True)
+    with pytest.raises(MigrationError, match="belongs to Stoat server"):
+        await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert (tmp_path / "state.json").read_bytes() == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json", "state.json.v1.bak"]
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+@pytest.mark.parametrize("case", ["omitted", "equal", "saved-empty", "fresh-run"])
+async def test_matching_or_fresh_runs_are_not_refused(tmp_path: Path, case: str) -> None:
+    """SC-3.1 to SC-3.4: only a real mismatch is refused."""
+    saved = "" if case == "saved-empty" else valid_stoat_id(5)
+    _saved_progress(tmp_path, saved)
+    server_id = {"omitted": None, "equal": valid_stoat_id(5)}.get(case, valid_stoat_id(9))
+    flags: dict[str, object] = {} if case == "fresh-run" else {"incremental": True}
+    config = _make_config(tmp_path, server_id=server_id, dry_run=True, **flags)
+    await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+
+
+async def test_padded_server_id_is_a_mismatch_shown_verbatim(tmp_path: Path) -> None:
+    """SC-3.6: exact string match; the requested value is shown as given."""
+    _saved_progress(tmp_path, valid_stoat_id(5))
+    padded = valid_stoat_id(5) + " "
+    config = _make_config(tmp_path, server_id=padded, incremental=True)
+    with pytest.raises(MigrationError) as caught:
+        await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert f"'{padded}'" in str(caught.value)
