@@ -97,6 +97,8 @@ def _unstarted_nicegui_app(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(app, "middleware_stack", None)
     monkeypatch.setattr(app, "user_middleware", list(app.user_middleware))
+    # Undo the build-time wrapper `_install_host_guard` puts on the app (#1295).
+    monkeypatch.setattr(app, "build_middleware_stack", app.build_middleware_stack)
 
 
 @pytest.fixture
