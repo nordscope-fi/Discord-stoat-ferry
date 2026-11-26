@@ -1685,23 +1685,30 @@ def test_permission_index_sources_keep_a_saved_key_over_the_table():
     ) == {"forum-index-forum-Ideas & help": ("333",)}
 
 
-async def test_permission_preflight_stops_when_real_forum_posts_differ(tmp_path):
-    """#1217 SC-1.6: posts sharing a name-keyed index with different access stop safely."""
-    from discord_ferry.errors import PermissionSafetyError
+async def test_permission_preflight_gives_two_same_named_forums_their_own_indexes(tmp_path):
+    """#1640 SC-1.5: forums with different access no longer share an index, so nothing stops.
 
+    Before #1640 both posts shared `forum-index-forum-Ideas & help` and the preflight
+    refused with "Indexed source channels do not share one exact mapped access result"
+    (#1217 SC-1.6). Each forum now has its own index holding only its own post.
+    """
     config, exports = _real_forum_case(tmp_path, split_parents=True)
     with aioresponses() as remote:
         remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
         async with aiohttp.ClientSession() as session:
-            with pytest.raises(PermissionSafetyError) as caught:
-                await _permission_preflight_operation()(
-                    config, MigrationState(), exports, session, mode="migration"
-                )
+            runtime = await _permission_preflight_operation()(
+                config, MigrationState(), exports, session, mode="migration"
+            )
         assert all(method == "GET" for method, _ in remote.requests)
-    assert caught.value.outcome.reason == "unsupported"
-    assert [problem.guidance for problem in caught.value.outcome.problems] == [
-        "Indexed source channels do not share one exact mapped access result"
-    ]
+    indexes = {
+        c.source_key: c.source_ids
+        for c in runtime.plan.channels
+        if c.source_key.startswith("forum-index-")
+    }
+    assert indexes == {
+        "forum-index-forum-Ideas & help": frozenset({"222"}),
+        "forum-index-forum-Ideas & help~301": frozenset({"333"}),
+    }
 
 
 async def test_permission_preflight_carried_channel_reads_without_correcting(tmp_path):
