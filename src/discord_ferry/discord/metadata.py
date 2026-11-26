@@ -23,7 +23,7 @@ from discord_ferry.errors import MigrationError
 from discord_ferry.state import _FORUM_CATEGORY_KEY_PREFIX
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Collection, Mapping
     from pathlib import Path
 
     from discord_ferry.config import FerryConfig
@@ -919,3 +919,27 @@ def forum_key_table(
             )
             table[forum_id] = f"{_FORUM_KEY_PREFIX}{names[forum_id]}"
     return table
+
+
+def forum_group_key(
+    export: DCEExport,
+    forum_ids: frozenset[str],
+    table: Mapping[str, str],
+    saved_categories: Mapping[str, str],
+) -> str | None:
+    """The key a forum post is filed under, or ``None`` when the export is not a forum post.
+
+    Order: the post's own saved ``channel_categories`` key when it is a forum key (every
+    migration under way keeps its keys), then the forum's key from ``table`` (real posts
+    only), then ``forum-<parent name>``, which is today's key. The last step covers a
+    legacy type 15/16 export with no reliable forum id and any run without metadata.
+    """
+    if not is_forum_post(export, forum_ids):
+        return None
+    saved = saved_categories.get(export.channel.id)
+    if isinstance(saved, str) and saved.startswith(_FORUM_KEY_PREFIX):
+        return saved
+    forum_id = export.channel.category_id
+    if forum_id in forum_ids and forum_id in table:
+        return table[forum_id]
+    return f"{_FORUM_KEY_PREFIX}{export.parent_channel_name}"

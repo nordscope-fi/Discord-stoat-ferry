@@ -6,7 +6,9 @@ from discord_ferry.discord import client
 from discord_ferry.discord.metadata import (
     DiscordMetadata,
     capture_permission_source,
+    forum_group_key,
     forum_key_table,
+    forum_parent_ids,
 )
 from discord_ferry.parser.models import DCEChannel, DCEExport, DCEGuild
 from discord_ferry.state import MigrationState
@@ -125,3 +127,49 @@ def test_a_forum_named_like_a_suffixed_key_falls_back_to_plain_name_keys() -> No
     exports = [_post("a", "300", "Q"), _post("b", "301", "Q"), _post("c", "302", "Q~301")]
     table = forum_key_table(_meta("300", "301", "302"), MigrationState(), exports)
     assert table == {"300": "forum-Q", "301": "forum-Q", "302": "forum-Q~301"}
+
+
+def test_a_non_forum_export_has_no_group_key() -> None:
+    plain_channel = DCEExport(DCEGuild("111", "source"), DCEChannel("5", 0, "general"))
+    assert forum_group_key(plain_channel, frozenset({"300"}), {}, {}) is None
+
+
+def test_a_real_post_takes_its_forums_table_key() -> None:
+    forum_ids = forum_parent_ids(_meta("300", "301"))
+    table = {"300": PLAIN, "301": f"{PLAIN}~301"}
+    assert forum_group_key(_post("333", "301"), forum_ids, table, {}) == f"{PLAIN}~301"
+
+
+def test_a_saved_category_key_wins_over_the_table() -> None:
+    """SC-3.2: a post filed before this change keeps its key whatever the table says."""
+    forum_ids = frozenset({"300", "301"})
+    table = {"300": PLAIN, "301": f"{PLAIN}~301"}
+    saved = {"333": PLAIN}
+    assert forum_group_key(_post("333", "301"), forum_ids, table, saved) == PLAIN
+
+
+def test_a_saved_key_that_is_not_a_forum_key_is_ignored() -> None:
+    forum_ids = frozenset({"300"})
+    assert forum_group_key(_post("222", "300"), forum_ids, {"300": PLAIN}, {"222": "cat1"}) == PLAIN
+
+
+def test_a_legacy_export_without_a_forum_id_uses_the_name_key() -> None:
+    """SC-2.2: a type 15 export whose category id is not a known forum."""
+    legacy = DCEExport(
+        DCEGuild("111", "source"),
+        DCEChannel("9", 15, "post", category_id="999"),
+        is_thread=True,
+        parent_channel_name="Questions",
+    )
+    assert forum_group_key(legacy, frozenset({"300"}), {"300": PLAIN}, {}) == "forum-Questions"
+
+
+def test_without_metadata_a_forum_post_uses_the_name_key() -> None:
+    """SC-2.2: an empty forum id set and an empty table give today's key."""
+    legacy = DCEExport(
+        DCEGuild("111", "source"),
+        DCEChannel("9", 15, "post", category_id="999"),
+        is_thread=True,
+        parent_channel_name="Questions",
+    )
+    assert forum_group_key(legacy, frozenset(), {}, {}) == "forum-Questions"
