@@ -334,6 +334,12 @@ class MigrationState:
     forum_channel_members: dict[str, list[str]] = field(default_factory=dict)
     # forum_category_names: forum_cat_key -> display name of the forum
     forum_category_names: dict[str, str] = field(default_factory=dict)
+    # forum_key_forums: forum_cat_key -> Discord forum ids filed under that key (#1640).
+    # Written when the channels phase creates a forum category, so a plain
+    # ``forum-<name>`` key always has a recorded owner. One id means that forum owns
+    # the plain key; two or more mean the state merged them and none is split off.
+    # A plain key in ``category_map`` with no entry here predates this field.
+    forum_key_forums: dict[str, list[str]] = field(default_factory=dict)
     # Per-channel message counts: discord_channel_id -> messages migrated.
     # Incremented by _process_message; used by forum index rebuild in REPORT phase.
     channel_message_counts: dict[str, int] = field(default_factory=dict)
@@ -966,6 +972,22 @@ def check_state_ids(state: MigrationState) -> None:
             p.discord(f"thread_parent_ids[{_show(child)}] parent", parent)
     else:
         p.add("thread_parent_ids", "expected an object of Discord id pairs")
+    if isinstance(state.forum_key_forums, dict):
+        for key, forum_ids in state.forum_key_forums.items():
+            where = f"forum_key_forums[{_show(key)}]"
+            if (
+                not isinstance(key, str)
+                or not key.startswith(_FORUM_CATEGORY_KEY_PREFIX)
+                or len(key) <= len(_FORUM_CATEGORY_KEY_PREFIX)
+            ):
+                p.add(where, f"key {_show(key)} is not a forum key")
+            if isinstance(forum_ids, list):
+                for forum_id in forum_ids:
+                    p.discord(f"{where} forum id", forum_id)
+            else:
+                p.add(where, "expected a list of Discord forum ids")
+    else:
+        p.add("forum_key_forums", "expected an object of forum keys")
     _check_map(
         p,
         "category_map",
@@ -1106,6 +1128,7 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "source_messages_total": state.source_messages_total,
         "forum_channel_members": state.forum_channel_members,
         "forum_category_names": state.forum_category_names,
+        "forum_key_forums": state.forum_key_forums,
         "default_channel_ids": state.default_channel_ids,
         "channel_message_counts": state.channel_message_counts,
         "reaction_message_counts": state.reaction_message_counts,
@@ -1197,6 +1220,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             source_messages_total=data.get("source_messages_total", 0),
             forum_channel_members=data.get("forum_channel_members", {}),
             forum_category_names=data.get("forum_category_names", {}),
+            forum_key_forums=data.get("forum_key_forums", {}),
             default_channel_ids=data.get("default_channel_ids", []),
             channel_message_counts=data.get("channel_message_counts", {}),
             reaction_message_counts=data.get("reaction_message_counts", {}),
