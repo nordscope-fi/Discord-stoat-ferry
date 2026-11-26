@@ -1195,9 +1195,10 @@ The GUI also serves tool pages under `/tools` (check, repair, retry, probe, blue
 build, validate, stats, TLS check). See the [GUI walkthrough](../guides/gui-walkthrough.md#tools).
 
 **Local access**: A guard in front of every route refuses any request whose `Host` header is not
-`127.0.0.1`, `localhost` or `[::1]` (#964), and any request whose `Origin` header names another
-website or is `null` (#1295). A request with no `Origin` passes, because same-site page loads and
-non-browser clients send none. The check covers pages, uploads and the live Socket.IO connection.
+`127.0.0.1`, `localhost` or `[::1]` (#964). It also refuses any request whose `Origin` header is not
+one of Ferry's own addresses on port 8765, and that includes `null` (#1295, #1700). The allowed
+origins are `http://127.0.0.1:8765`, `http://localhost:8765` and `http://[::1]:8765`. A request with
+no `Origin` passes, because same-site page loads and non-browser clients send none. The check covers pages, uploads and the live Socket.IO connection.
 A refused HTTP request gets a `400` that names the failed check. A refused websocket is closed
 before it is accepted. NiceGUI adds its session layers after Ferry installs the guard, so Ferry
 moves the guard to the front when the web server assembles its middleware. A refused request
