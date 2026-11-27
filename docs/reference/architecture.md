@@ -89,7 +89,7 @@ src/discord_ferry/
 │   ├── connect.py           # Phase 2: CONNECT, test credentials, discover Autumn URL
 │   ├── structure.py         # Phases 3–6: SERVER, ROLES, CATEGORIES, CHANNELS
 │   ├── emoji.py             # Phase 7: EMOJI, extract, upload, register
-│   ├── avatars.py           # Phase 7.5: AVATARS, pre-flight avatar download + Autumn upload
+│   ├── avatars.py           # Phase 7.5: AVATARS, one Discord picture link per author
 │   ├── messages.py          # Phase 8: MESSAGES, 9-step per-message pipeline
 │   ├── reactions.py         # Phase 9: REACTIONS, apply queued reactions
 │   └── pins.py              # Phase 10: PINS, re-pin messages
@@ -131,7 +131,7 @@ cli.py ──────┘         │
                        ├──→ migrator/connect.py
                        ├──→ migrator/structure.py ──→ migrator/api.py
                        ├──→ migrator/emoji.py ─────→ migrator/api.py, uploader/
-                       ├──→ migrator/avatars.py ───→ uploader/
+                       ├──→ migrator/avatars.py ───→ discord/client.py
                        ├──→ migrator/messages.py ──→ migrator/api.py, uploader/, parser/transforms
                        ├──→ migrator/reactions.py ─→ migrator/api.py
                        ├──→ migrator/pins.py ──────→ migrator/api.py
@@ -177,7 +177,7 @@ class FerryConfig:
     checkpoint_interval: (
         int  # State save frequency during messages (default 50, min 1, throttled max 1/5s)
     )
-    skip_avatars: bool  # Skip the avatar pre-flight phase (default False)
+    skip_avatars: bool  # Skip author pictures: messages carry none (default False)
     reaction_mode: str  # "text" (default), "native" (Phase 9 API), or "skip"
     min_thread_messages: int  # Filter threads below this count (0 = include all)
     validate_after: bool  # Run post-migration validation phase (default False)
@@ -229,7 +229,8 @@ class MigrationState:
     emoji_map: dict[str, str]
 
     # Upload caches (avoid re-uploading identical files)
-    avatar_cache: dict[str, str]  # User ID → Autumn avatar file ID (not a CDN URL)
+    author_avatar_links: dict[str, str]  # User ID → picture link on Discord's picture host
+    author_avatar_reasons: dict[str, str]  # User ID → reason code, for an author with no link
     upload_cache: dict[str, str]  # "<tag>:<local file path>" → Autumn file ID
 
     # Author context (for mention remapping in transforms)
@@ -438,7 +439,7 @@ EXPORT → VALIDATE → CONNECT → SERVER → ROLES → CATEGORIES → CHANNELS
 | 5 | **CATEGORIES** | `migrator/structure.py` | exports | category_map | `PATCH /servers/:id` |
 | 6 | **CHANNELS** | `migrator/structure.py` | exports, discord_metadata | channel_map | `POST /servers/:id/channels`, permission PUTs |
 | 7 | **EMOJI** | `migrator/emoji.py` | message content + reactions | emoji_map | Autumn upload + `PUT /custom/emoji/:id` |
-| 7.5 | **AVATARS** | `migrator/avatars.py` | all exports (unique authors) | avatar_cache | Autumn upload |
+| 7.5 | **AVATARS** | `migrator/avatars.py` | all exports (unique authors) | author_avatar_links, author_avatar_reasons | `GET /users/:id` on Discord |
 | 8 | **MESSAGES** | `migrator/messages.py` | all messages | message_map, pending_pins/reactions | `POST /channels/:id/messages`, Autumn uploads |
 | 9 | **REACTIONS** | `migrator/reactions.py` | pending_reactions | reactions_applied | `PUT /channels/:id/messages/:id/reactions` |
 | 10 | **PINS** | `migrator/pins.py` | pending_pins | pins_applied | `PUT /channels/:id/messages/:id/pin` |
@@ -515,12 +516,13 @@ content (`<:name:ID>`) and reactions. Deduplicates by ID. Downloads each emoji i
 to Autumn with tag `emojis`, creates on server. 0.5s delay between creates (`_CREATION_DELAY` in
 `migrator/emoji.py`). Populates `state.emoji_map`.
 
-**AVATARS** (Phase 7.5): Pre-flight avatar download and upload. `run_avatars()` in
-`migrator/avatars.py` scans all exports for unique authors and downloads each author's avatar.
-It uploads the local file or remote URL to Autumn with the `avatars` tag and populates
-`state.avatar_cache` (user ID → Autumn file ID). This front-loads all avatar uploads before
-the MESSAGES phase begins, so message sends never block on avatar I/O. Skippable via
-`skip_avatars` config flag. Added in v1.5.0.
+**AVATARS** (Phase 7.5): Author picture links. `run_avatars()` in `migrator/avatars.py`
+scans all exports for unique authors and saves, for each, either a picture link on Discord's own
+picture host (`state.author_avatar_links`) or a reason code (`state.author_avatar_reasons`). An
+export link is used when it is on `cdn.discordapp.com` or `media.discordapp.net`; otherwise, with
+a Discord token, one `GET /users/{id}` gives the picture hash. Nothing is uploaded to Autumn,
+because Stoat refuses an unattached file and deletes it after one hour. The MESSAGES phase only
+reads the saved link. Skippable via the `skip_avatars` config flag, which then means no pictures.
 
 **MESSAGES** (Phase 8): The largest phase. In v2.0.0 this phase uses a **parallel channel
 architecture**:
@@ -869,8 +871,8 @@ Local file → validate size → POST multipart to {autumn_url}/{tag} → file I
 ### Upload Cache
 
 `upload_with_cache()` maintains an in-memory cache keyed on local file path. If the same file
-appears multiple times (e.g. an author who appears in thousands of messages), the avatar is
-uploaded once and the Autumn file ID is reused for all subsequent messages.
+appears multiple times (e.g. one attachment referenced by several messages), it is uploaded once
+and the Autumn file ID is reused for all subsequent messages.
 
 A conservative 0.5s sleep is inserted between uploads to avoid bursting the catch-all rate
 limit bucket.
@@ -977,7 +979,7 @@ full content transformation and author attribution.
 5. Embed flattening    → convert Discord embed to Stoat format, upload media
 6. System fallback     → preserve DCE content and embeds, including `PollResult` notifications
 7. Reaction summary    → append text when text reaction mode is selected
-8. Masquerade build    → original author name + avatar (lazy upload) + colour
+8. Masquerade build    → original author name + saved picture link + colour
 9. Send               → api_send_message with Idempotency-Key for deduplication
 ```
 
@@ -989,7 +991,7 @@ Discord author:
 ```python
 masquerade = {
     "name": "Alice",  # Original display name
-    "avatar": "autumn-file-id-for-avatar",  # Uploaded once, cached
+    "avatar": "https://cdn.discordapp.com/avatars/<id>/<hash>.png",  # Saved by AVATARS
     "colour": "#5865F2",  # British spelling required
 }
 ```
@@ -997,8 +999,9 @@ masquerade = {
 - `Masquerade` permission (bit 28) is required for `name` and `avatar`
 - `ManageRole` permission (bit 3) is additionally required for `colour`
 
-Avatar upload is lazy: the first message from an author triggers an Autumn upload; all
-subsequent messages reuse the cached file ID from `state.avatar_cache`.
+The avatar is the link the AVATARS phase saved in `state.author_avatar_links`. The MESSAGES
+phase never uploads a picture, reads a picture file or calls Discord; an author with no saved link
+is sent without an `avatar`.
 
 ### Idempotency-Key Deduplication
 
@@ -1488,8 +1491,9 @@ The score is written to `migration_report.json` under `fidelity_score`.
 
 `--incremental` mode re-uses an existing state file's ID maps to migrate only new content:
 
-- `channel_map`, `role_map`, `category_map`, `emoji_map`, `message_map`, and `avatar_cache`
-  are carried forward from the prior state
+- `channel_map`, `role_map`, `category_map`, `emoji_map`, and `message_map`
+  are carried forward from the prior state. The author picture maps are not: every author is
+  looked up again
 - Only channels whose Discord Snowflake ID is absent from `completed_channel_ids` are processed
 - Within a partially-migrated channel, `channel_message_offsets` marks the resume point
 - `--resume` and `--incremental` are mutually exclusive (enforced at CLI startup)

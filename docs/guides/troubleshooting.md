@@ -425,13 +425,13 @@ string turns off one scheme at a time. `http_proxy=""` disables the HTTP proxy w
 
 ## Avatar Issues
 
-### Avatar pre-flight shows 0 uploads
+### Migrated messages show no author picture
 
 | | |
 |---|---|
-| **Symptom** | Avatar pre-flight reports "Uploaded 0 of N unique avatars." |
-| **Cause** | Your DCE export does not include local avatar files. This happens when the export was created without the `--media` flag, so avatar URLs point to Discord's CDN instead of local files. |
-| **Solution** | Re-export from DiscordChatExporter with the `--media` flag. Ferry will then upload the locally downloaded avatar files. |
+| **Symptom** | The Avatars phase reports "Pictures set for 0 of N authors", or fewer than you expect, and some messages show the migrating account's own picture instead of the author's. |
+| **Cause** | The report's "Author Pictures" section (and `migration_report.json`, key `author_pictures`) counts each reason. "no Discord token": pictures need a Discord token and none was given. "token rejected": Discord refused the token. "token cannot look up users": Discord does not let this token read other users, which can happen with a personal-account token. "no Discord picture": the author has no picture on Discord. "lookup failed": Discord did not answer for that author. "export link not accepted": the export holds a picture link that is not on Discord's picture servers. "link too long": the picture link is longer than the 256 characters Stoat accepts. |
+| **Solution** | Run a new migration with a valid Discord token (`--discord-token`, or `DISCORD_TOKEN`), preferably a bot token for the server. Ferry looks each author up once. Messages that are already migrated are not changed. |
 
 ---
 

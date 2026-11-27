@@ -74,7 +74,7 @@ Below these, three labelled groups hold the tuning settings:
 |--------|---------|-------------|
 | Reaction mode | Text | **Text** appends a reaction summary to each message (fast). **Native** adds per-emoji reactions via the API (slow, Stoat caps 20 per message). **Skip** drops reactions. |
 | Min thread messages | 0 | Exclude threads with fewer messages than this (0 = include all). Useful for servers with hundreds of low-activity threads. |
-| Skip avatar pre-flight | Off | Skip the avatar batch-upload phase; avatars still upload on demand during messages. |
+| Skip author pictures | Off | Do not look up author pictures; migrated messages show no picture. |
 
 **Safety**
 
@@ -242,7 +242,7 @@ The 13 phases are shown in order, with a checkmark as each completes:
 6. **Categories**, create channel categories
 7. **Channels**, create all channels with NSFW flags, then apply per-channel permission overrides
 8. **Emoji**, upload custom emoji
-9. **Avatars**, pre-fetch every author's avatar and upload it to Stoat once, so message sends never wait on avatar I/O (skip with **Skip avatar pre-flight** under Advanced Options, or `--skip-avatars` on the CLI)
+9. **Avatars**, look up each author's Discord picture once and save its link, so message sends never wait on Discord. Pictures need a Discord token (skip them with **Skip author pictures** under Advanced Options, or `--skip-avatars` on the CLI)
 10. **Messages**, send all messages
 11. **Reactions**, add message reactions (or, in the default `text` mode, no-op because reaction summaries were appended during Messages)
 12. **Pins**, pin messages
@@ -336,7 +336,7 @@ migration. You can select each one before proceeding.
 Rollback is idempotent, if it's interrupted, just click the button again and it picks up where it left off. The migration's `state.json` and entity maps are preserved as a forensic audit trail; deletions are tracked in a separate `rollback_progress.rolled_back_ids` field.
 
 !!! note "What rollback does not delete"
-    Uploaded attachments, avatars, and emoji images remain on Stoat's Autumn file store, Autumn has no public DELETE endpoint. The rollback summary reports the orphan count. The Stoat server itself is never deleted; rollback only removes what Ferry created inside it.
+    Uploaded attachments and emoji images remain on Stoat's Autumn file store, Autumn has no public DELETE endpoint. The rollback summary reports the orphan count. The Stoat server itself is never deleted; rollback only removes what Ferry created inside it.
 
 The same operation is available on the CLI as `ferry rollback --output-dir <path>`, see the [CLI reference](cli-reference.md#ferry-rollback) for full options.
 

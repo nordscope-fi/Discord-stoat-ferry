@@ -145,7 +145,7 @@ Before you start, confirm you have these ready:
     | `--checkpoint-interval N` | Save state at the first multiple of N messages reached 5 or more seconds after the last save (default 50; raise for very large runs) |
     | `--max-concurrent-channels N` | Channels processed in parallel (default 3; self-hosted only) |
     | `--max-concurrent-requests N` | Concurrent API calls across all channel workers (default 5) |
-    | `--skip-avatars` | Skip the avatar pre-flight phase (avatars still upload on demand) |
+    | `--skip-avatars` | Skip author pictures; migrated messages show no picture |
     | `--validate-after` | After migration, verify every channel, role, category and emoji by ID (same as `ferry check`; results in `state.json`) |
     | `--yes` / `-y` | Skip the terms-of-service confirmation prompt (for scripted runs) |
 

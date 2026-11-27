@@ -154,7 +154,7 @@ These options are available. Decide which apply to your migration before you sta
 | `--min-thread-messages N` | Exclude threads below a message count | Use when your server has hundreds of low-activity threads |
 | `--max-concurrent-channels N` / `--max-concurrent-requests N` | Parallelism during message migration | Raise only on self-hosted instances with relaxed rate limits |
 | `--checkpoint-interval N` | How often state is saved (every N messages, but at most once per 5 seconds) | Raise to ~200 for very large migrations to reduce disk I/O |
-| `--skip-avatars` | Skip the avatar pre-flight phase | Avatars still upload on demand during messages |
+| `--skip-avatars` | Skip author pictures | Migrated messages show no picture |
 | `--validate-after` | After migration, verifies every channel, role, category and emoji by ID (same as `ferry check`) | Use when you want an automatic sanity check of the result |
 
 **Why:** Choosing the wrong thread strategy or omitting `--incremental` on a second run will duplicate messages or create an unexpected channel structure. Decide before starting. These options cannot be changed mid-migration.
