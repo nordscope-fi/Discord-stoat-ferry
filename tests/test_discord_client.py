@@ -1098,3 +1098,25 @@ async def test_download_role_icon_none_on_timeout():
             raise TimeoutError
 
     assert await download_role_icon(_TimingOut(), "r1", "hash") is None  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# 403 gets its own error class (#1208)
+# ---------------------------------------------------------------------------
+
+
+async def test_discord_403_raises_the_forbidden_subclass(mock_discord: aioresponses) -> None:
+    from discord_ferry.errors import DiscordForbiddenError
+
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}/roles"
+    mock_discord.get(url, status=403, body="Forbidden")
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(DiscordForbiddenError, match="Insufficient permissions"):
+            await fetch_guild_roles(session, TOKEN, GUILD_ID)
+
+
+def test_discord_forbidden_error_is_a_migration_error_but_not_an_auth_error() -> None:
+    from discord_ferry.errors import DiscordForbiddenError
+
+    assert issubclass(DiscordForbiddenError, MigrationError)
+    assert not issubclass(DiscordForbiddenError, DiscordAuthError)

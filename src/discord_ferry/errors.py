@@ -101,3 +101,12 @@ class DotNetMissingError(ExportError):
 
 class DiscordAuthError(ExportError):
     """Discord token validation failed."""
+
+
+class DiscordForbiddenError(MigrationError):
+    """Discord answered 403: the token may not use the requested route.
+
+    Subclasses MigrationError so every caller that already catches that keeps its
+    handling. A caller that cares about the difference (the author picture lookups)
+    catches this class first.
+    """
