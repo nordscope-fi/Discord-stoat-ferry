@@ -180,6 +180,21 @@ def _decode_staged_input(value: object) -> StagedInputWitness | None:
     )
 
 
+#: Why an author has no picture on their migrated messages (#1208), with the short wording the
+#: report and the progress summary use. Codes only, never free text, so the maps that hold them
+#: are structural. The order here is the order the report lists them in.
+AVATAR_REASON_LABELS: dict[str, str] = {
+    "no_picture": "no Discord picture",
+    "no_discord_token": "no Discord token",
+    "lookup_failed": "lookup failed",
+    "token_rejected": "token rejected",
+    "lookup_not_allowed": "token cannot look up users",
+    "export_link_unusable": "export link not accepted",
+    "link_too_long": "link too long",
+}
+AVATAR_REASON_CODES: tuple[str, ...] = tuple(AVATAR_REASON_LABELS)
+
+
 @dataclass
 class MigrationState:
     """Tracks all ID mappings and progress for resume support."""
@@ -236,6 +251,15 @@ class MigrationState:
 
     # Author ID -> uploaded Autumn avatar ID
     avatar_cache: dict[str, str] = field(default_factory=dict)
+
+    # Author ID -> picture link on Discord's own picture host (#1208). Written once per
+    # author by the avatars phase. Every link passed remote_media_refusal and a path check,
+    # so it holds no free text and stays out of _TEXT_MEMBERS.
+    author_avatar_links: dict[str, str] = field(default_factory=dict)
+
+    # Author ID -> one code from AVATAR_REASON_CODES, for an author with no link. Codes only,
+    # so structural. Once the phase has seen an author, they are in exactly one of the two maps.
+    author_avatar_reasons: dict[str, str] = field(default_factory=dict)
 
     # Autumn upload cache: "<tag>:<local_path>" -> autumn_file_id (see upload_cache_key).
     # Entries from before #984 have a bare-path key; they are never matched, so a
@@ -1064,6 +1088,26 @@ def check_state_ids(state: MigrationState) -> None:
         raise StateError(f"state.json holds a saved id that is not valid: {p.items[0]}{more}")
 
 
+def author_picture_counts(state: MigrationState) -> dict[str, int]:
+    """Count authors by outcome, for the report and the progress summary.
+
+    Returns ``total``, ``with_picture`` and one entry per reason that has at least one
+    author, keyed by its code and in AVATAR_REASON_CODES order. A reason that is not a
+    known code (a hand-edited state file) is not counted, so free text never becomes a key.
+    """
+    reasons: dict[str, int] = {}
+    for reason in state.author_avatar_reasons.values():
+        if reason in AVATAR_REASON_LABELS:
+            reasons[reason] = reasons.get(reason, 0) + 1
+    with_picture = len(state.author_avatar_links)
+    counts: dict[str, int] = {"total": with_picture + sum(reasons.values())}
+    counts["with_picture"] = with_picture
+    for code in AVATAR_REASON_CODES:
+        if code in reasons:
+            counts[code] = reasons[code]
+    return counts
+
+
 def _state_to_dict(state: MigrationState) -> dict[str, Any]:
     _validate_delivery_binding(state)
     rp_data: dict[str, Any] | None
@@ -1093,6 +1137,8 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "emoji_map": state.emoji_map,
         "pending_emoji_rewrites": state.pending_emoji_rewrites,
         "avatar_cache": state.avatar_cache,
+        "author_avatar_links": state.author_avatar_links,
+        "author_avatar_reasons": state.author_avatar_reasons,
         "upload_cache": state.upload_cache,
         "author_names": state.author_names,
         "pending_pins": [list(p) for p in state.pending_pins],
@@ -1187,6 +1233,8 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             emoji_map=data.get("emoji_map", {}),
             pending_emoji_rewrites=data.get("pending_emoji_rewrites", {}),
             avatar_cache=data.get("avatar_cache", {}),
+            author_avatar_links=data.get("author_avatar_links", {}),
+            author_avatar_reasons=data.get("author_avatar_reasons", {}),
             upload_cache=data.get("upload_cache", {}),
             author_names=data.get("author_names", {}),
             pending_pins=[(p[0], p[1]) for p in data.get("pending_pins", []) if len(p) == 2],

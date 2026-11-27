@@ -1566,6 +1566,10 @@ _KNOWN_STATE_FIELDS = frozenset(
         # never a Ferry secret, so it stays out of _TEXT_MEMBERS.
         "pending_emoji_rewrites",
         "avatar_cache",
+        # Structural: a picture link that passed remote_media_refusal and a path check,
+        # and a fixed reason code. Neither holds free text (#1208).
+        "author_avatar_links",
+        "author_avatar_reasons",
         "upload_cache",
         "author_names",
         "pending_pins",
@@ -1632,6 +1636,63 @@ def test_state_document_has_no_unclassified_fields() -> None:
     assert _KNOWN_STATE_FIELDS - emitted == set(), (
         "a state.json field was removed; update this list"
     )
+
+
+def test_author_avatar_maps_round_trip(tmp_path: Path) -> None:
+    """SC-5.2: the saved picture links and reason codes survive save then load."""
+    link = "https://cdn.discordapp.com/avatars/101/abc.png"
+    state = MigrationState(
+        author_avatar_links={"101": link},
+        author_avatar_reasons={"102": "no_picture", "103": "token_rejected"},
+    )
+    save_state(state, tmp_path)
+    loaded = load_state(tmp_path)
+    assert loaded.author_avatar_links == {"101": link}
+    assert loaded.author_avatar_reasons == {"102": "no_picture", "103": "token_rejected"}
+
+
+def test_author_avatar_maps_default_empty_for_an_older_state_file(tmp_path: Path) -> None:
+    """SC-5.1: a state file written before the maps existed loads them as empty."""
+    save_state(MigrationState(), tmp_path)
+    raw = json.loads((tmp_path / "state.json").read_text())
+    del raw["author_avatar_links"]
+    del raw["author_avatar_reasons"]
+    (tmp_path / "state.json").write_text(json.dumps(raw))
+    loaded = load_state(tmp_path)
+    assert loaded.author_avatar_links == {}
+    assert loaded.author_avatar_reasons == {}
+
+
+def test_author_picture_counts_by_outcome() -> None:
+    """SC-4.1: the shared read model reports total, with a picture, and each reason."""
+    from discord_ferry.state import author_picture_counts
+
+    base = "https://cdn.discordapp.com/avatars"
+    state = MigrationState(
+        author_avatar_links={
+            "1": f"{base}/1/a.png",
+            "2": f"{base}/2/b.png",
+            "3": f"{base}/3/c.png",
+        },
+        author_avatar_reasons={"4": "lookup_failed", "5": "no_picture", "6": "no_picture"},
+    )
+    counts = author_picture_counts(state)
+    assert counts == {"total": 6, "with_picture": 3, "no_picture": 2, "lookup_failed": 1}
+    assert list(counts) == ["total", "with_picture", "no_picture", "lookup_failed"]
+
+
+def test_author_picture_counts_empty_state() -> None:
+    from discord_ferry.state import author_picture_counts
+
+    assert author_picture_counts(MigrationState()) == {"total": 0, "with_picture": 0}
+
+
+def test_author_picture_counts_never_turns_free_text_into_a_key() -> None:
+    """A hand-edited reason that is not a known code is not counted, so it cannot reach a key."""
+    from discord_ferry.state import author_picture_counts
+
+    state = MigrationState(author_avatar_reasons={"1": "no_picture", "2": "boom hunter2horse"})
+    assert author_picture_counts(state) == {"total": 1, "with_picture": 0, "no_picture": 1}
 
 
 def test_pending_emoji_rewrites_round_trips(tmp_path: Path) -> None:
