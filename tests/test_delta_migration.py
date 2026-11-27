@@ -75,7 +75,8 @@ async def test_incremental_loads_prior_state(tmp_path: Path) -> None:
         role_map={"810": "01J5T000000000000000000810"},
         category_map={"830": "stoat-cat-1"},
         emoji_map={"850": "autumn-em-1"},
-        avatar_cache={"user1": "autumn-av-1"},
+        author_avatar_links={"user1": "https://cdn.discordapp.com/avatars/1/a.png"},
+        author_avatar_reasons={"user2": "token_rejected"},
         stoat_server_id=SERVER_ID,
         autumn_url="https://autumn.test",
         channel_message_offsets={"111": "99999"},
@@ -98,7 +99,10 @@ async def test_incremental_loads_prior_state(tmp_path: Path) -> None:
     assert state.role_map == {"810": "01J5T000000000000000000810"}
     assert state.category_map == {"830": "stoat-cat-1"}
     assert state.emoji_map == {"850": "autumn-em-1"}
-    assert state.avatar_cache == {"user1": "autumn-av-1"}
+    # The picture maps are NOT carried (#1208): every author is looked up again, so a changed
+    # picture is picked up and a token-dependent reason is retried.
+    assert state.author_avatar_links == {}
+    assert state.author_avatar_reasons == {}
     assert state.stoat_server_id == SERVER_ID
     assert state.autumn_url == "https://autumn.test"
 
@@ -116,6 +120,66 @@ async def test_incremental_loads_prior_state(tmp_path: Path) -> None:
     # Incremental event emitted
     progress_events = [e for e in events if e.status == "progress" and "Incremental" in e.message]
     assert len(progress_events) >= 1
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_incremental_looks_up_every_author_again_including_a_new_one(tmp_path: Path) -> None:
+    """SC-I4 and SC-5.5: the second pass starts with empty picture maps and asks for all."""
+    from aioresponses import aioresponses
+
+    from discord_ferry.migrator.avatars import run_avatars
+    from discord_ferry.parser.models import (
+        DCEAuthor,
+        DCEChannel,
+        DCEExport,
+        DCEGuild,
+        DCEMessage,
+    )
+
+    old_link = "https://cdn.discordapp.com/avatars/1/" + "a" * 32 + ".png"
+    _make_prior_state(
+        tmp_path,
+        author_avatar_links={"1": old_link},
+        author_avatar_reasons={"2": "token_rejected"},
+    )
+    second_export = DCEExport(
+        guild=DCEGuild(id="g1", name="Test"),
+        channel=DCEChannel(id="c1", type=0, name="general"),
+        messages=[
+            DCEMessage(
+                id=f"m{author_id}",
+                type="Default",
+                timestamp="2024-01-01T00:00:00Z",
+                content="hi",
+                author=DCEAuthor(id=author_id, name=f"Author {author_id}"),
+            )
+            for author_id in ("1", "2", "3")  # "3" is new in the second export
+        ],
+    )
+
+    async def avatars(
+        config: FerryConfig, state: MigrationState, exports: list[Any], emit: EventCallback
+    ) -> None:
+        await run_avatars(config, state, [second_export], emit)
+
+    config = _make_config(tmp_path, incremental=True, discord_token="Bot incremental-token")
+    with aioresponses() as mock:
+        for author_id in ("1", "2", "3"):
+            mock.get(
+                f"https://discord.com/api/v10/users/{author_id}",
+                payload={"id": author_id, "avatar": "b" * 32},
+            )
+        state = await run_migration(
+            config, lambda e: None, phase_overrides={**_NOOP_OVERRIDES, "avatars": avatars}
+        )
+        asked = sorted(
+            url.path.rsplit("/", 1)[1] for (_m, url) in mock.requests if url.host == "discord.com"
+        )
+
+    assert asked == ["1", "2", "3"]
+    assert set(state.author_avatar_links) == {"1", "2", "3"}
+    assert state.author_avatar_links["1"] != old_link  # the changed picture is picked up
+    assert state.author_avatar_reasons == {}
 
 
 @pytest.mark.usefixtures("migration_preflight_unit_boundary")
@@ -360,3 +424,37 @@ async def test_incremental_seeds_then_carries_roles_finalized_for_old_state(tmp_
     config = _make_config(tmp_path, incremental=True)
     state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
     assert state.roles_finalized == {"810", "811"}
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_a_resume_with_skip_avatars_sends_no_picture_saved_by_the_earlier_run(
+    tmp_path: Path,
+) -> None:
+    """#1208 S1.3: skip means no picture, even when an earlier run saved links."""
+    from discord_ferry.migrator.messages import _build_masquerade
+    from discord_ferry.parser.models import DCEAuthor
+
+    link = "https://cdn.discordapp.com/avatars/1/" + "a" * 32 + ".png"
+    save_state(
+        MigrationState(
+            current_phase="messages",
+            started_at="2024-01-01T00:00:00+00:00",
+            author_avatar_links={"1": link},
+            author_avatar_reasons={"2": "no_picture"},
+        ),
+        tmp_path,
+    )
+    seen: list[dict[str, str | None]] = []
+
+    async def messages(
+        config: FerryConfig, state: MigrationState, exports: list[Any], emit: EventCallback
+    ) -> None:
+        seen.append(_build_masquerade(DCEAuthor(id="1", name="A"), state))
+
+    config = _make_config(tmp_path, resume=True, skip_avatars=True)
+    state = await run_migration(
+        config, lambda e: None, phase_overrides={**_NOOP_OVERRIDES, "messages": messages}
+    )
+    assert seen == [{"name": "A"}]
+    assert state.author_avatar_links == {}
+    assert state.author_avatar_reasons == {}

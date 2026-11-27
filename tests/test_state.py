@@ -731,7 +731,7 @@ def test_state_with_populated_maps(tmp_path: Path) -> None:
         category_map={"830": "s_cat1"},
         message_map={"840": stoat_id(4)},
         emoji_map={"850": "s_emoji1"},
-        avatar_cache={"author1": "autumn_av1"},
+        author_avatar_links={"author1": "https://cdn.discordapp.com/avatars/1/a.png"},
         upload_cache={"/path/to/file.png": "autumn_file1"},
         author_names={"12345": "Alice"},
         pending_reactions=[{"channel_id": stoat_id(2), "message_id": stoat_id(4), "emoji": "👍"}],
@@ -1565,7 +1565,6 @@ _KNOWN_STATE_FIELDS = frozenset(
         # Structural: identifiers only (discord id -> {old,new} stoat ids),
         # never a Ferry secret, so it stays out of _TEXT_MEMBERS.
         "pending_emoji_rewrites",
-        "avatar_cache",
         # Structural: a picture link that passed remote_media_refusal and a path check,
         # and a fixed reason code. Neither holds free text (#1208).
         "author_avatar_links",
@@ -1649,6 +1648,19 @@ def test_author_avatar_maps_round_trip(tmp_path: Path) -> None:
     loaded = load_state(tmp_path)
     assert loaded.author_avatar_links == {"101": link}
     assert loaded.author_avatar_reasons == {"102": "no_picture", "103": "token_rejected"}
+
+
+def test_a_state_file_with_the_retired_avatar_cache_still_loads(tmp_path: Path) -> None:
+    """SC-5.1: an old file's avatar_cache key is ignored, never read as a picture."""
+    save_state(MigrationState(), tmp_path)
+    raw = json.loads((tmp_path / "state.json").read_text())
+    raw["avatar_cache"] = {"101": "autumn-id-1"}
+    (tmp_path / "state.json").write_text(json.dumps(raw))
+    loaded = load_state(tmp_path)
+    assert not hasattr(loaded, "avatar_cache")
+    assert loaded.author_avatar_links == {}
+    save_state(loaded, tmp_path)
+    assert "avatar_cache" not in json.loads((tmp_path / "state.json").read_text())
 
 
 def test_author_avatar_maps_default_empty_for_an_older_state_file(tmp_path: Path) -> None:
