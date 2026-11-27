@@ -458,3 +458,56 @@ async def test_a_resume_with_skip_avatars_sends_no_picture_saved_by_the_earlier_
     assert seen == [{"name": "A"}]
     assert state.author_avatar_links == {}
     assert state.author_avatar_reasons == {}
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_incremental_decides_the_join_notice_again(tmp_path: Path) -> None:
+    """SC-I1: an incremental run starts with no outcome and decides against the server again.
+
+    The phase override calls the real _apply_join_notice, because the real channels phase
+    needs a permission operation that this unit does not set up.
+    """
+    from aioresponses import aioresponses
+
+    from discord_ferry.discord.metadata import (
+        DiscordMetadata,
+        load_discord_metadata,
+        save_discord_metadata,
+    )
+    from discord_ferry.migrator.api import get_session
+    from discord_ferry.migrator.structure import _apply_join_notice
+    from tests.stoat_ids import stoat_id
+
+    mapped = stoat_id(100)
+    _make_prior_state(
+        tmp_path,
+        stoat_server_id=SERVER_ID,
+        channel_map={"100": mapped},
+        join_notice_outcome="set",
+    )
+    save_discord_metadata(DiscordMetadata("111", "t", 0, {}, {}, system_channel_id="100"), tmp_path)
+    outcome_at_start: list[str] = []
+
+    async def channels(
+        config: FerryConfig, state: MigrationState, exports: list[Any], emit: EventCallback
+    ) -> None:
+        outcome_at_start.append(state.join_notice_outcome)
+        async with get_session(config) as session:
+            await _apply_join_notice(
+                config, state, session, load_discord_metadata(config.output_dir), emit
+            )
+
+    config = _make_config(tmp_path, incremental=True, discord_token="Bot incremental-token")
+    with aioresponses() as mock:
+        mock.get(
+            f"https://api.test/servers/{SERVER_ID}",
+            payload={"_id": SERVER_ID, "system_messages": {"user_joined": mapped}},
+        )
+        state = await run_migration(
+            config, lambda e: None, phase_overrides={**_NOOP_OVERRIDES, "channels": channels}
+        )
+        patches = [key for key in mock.requests if key[0] == "PATCH"]
+
+    assert outcome_at_start == [""]  # reset, not carried
+    assert state.join_notice_outcome == "set"
+    assert patches == []
