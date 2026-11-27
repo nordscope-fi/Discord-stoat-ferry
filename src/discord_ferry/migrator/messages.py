@@ -745,25 +745,7 @@ async def _process_merged_message(
     if msg.type in _SKIP_TYPES:
         return False
     content = _build_content(_merge_forwarded(msg), state)
-    masquerade, masq_escaped = await _build_masquerade(msg.author, session, state, config)
-    if masq_escaped:
-        state.warnings.append(
-            {
-                "phase": "messages",
-                "type": "unsafe_media_path",
-                "message": (
-                    f"Masquerade avatar for {msg.author.name} failed the "
-                    "export-root containment check; skipped."
-                ),
-            }
-        )
-        on_event(
-            MigrationEvent(
-                phase="messages",
-                status="warning",
-                message=f"Masquerade avatar for {msg.author.name} unsafe path; skipped.",
-            )
-        )
+    masquerade = _build_masquerade(msg.author, state)
     parts = _split_message(content)
     ref = delivery_ref or DeliveryRef(export.channel.id, msg.id, stoat_channel_id, "merged")
     legacy_keys: tuple[str, ...] = ()
@@ -1088,7 +1070,7 @@ async def _merge_threads(
                 # Placement is chosen. Below the `_thread_max_id` tracking so the durable
                 # high-water still advances over a suppressed message. Below `_would_skip`
                 # so incremental gating is untouched. Above _build_masquerade so a
-                # suppressed message costs no Autumn avatar upload.
+                # suppressed message does no masquerade work.
                 #
                 # Ordinary receipt recovery restores the parent map before this
                 # loop, so a recovered origin is suppressed by the same rule.
@@ -1351,7 +1333,7 @@ async def _process_single_channel(
 ) -> ChannelResult:
     """Process all messages in a single channel, returning a ChannelResult.
 
-    Reads from ``state`` (channel_map, emoji_map, avatar_cache, etc.) but writes
+    Reads from ``state`` (channel_map, emoji_map, author_avatar_links, etc.) but writes
     accumulators (warnings, errors, counters) to its own ChannelResult.
     """
     async with channel_sem:
@@ -1832,25 +1814,7 @@ async def _process_message(
         content = content + "\n" + "\n".join(attachment_placeholders)
 
     # Step 3: Build masquerade dict.
-    masquerade, masq_escaped = await _build_masquerade(msg.author, session, state, config)
-    if masq_escaped:
-        acc_warnings.append(
-            {
-                "phase": "messages",
-                "type": "unsafe_media_path",
-                "message": (
-                    f"Masquerade avatar for {msg.author.name} failed the export-root "
-                    "containment check; skipped."
-                ),
-            }
-        )
-        on_event(
-            MigrationEvent(
-                phase="messages",
-                status="warning",
-                message=f"Masquerade avatar for {msg.author.name} unsafe path; skipped.",
-            )
-        )
+    masquerade = _build_masquerade(msg.author, state)
 
     # Step 4: Flatten embeds and try their local media candidates (max 5).
     stoat_embeds: list[dict[str, Any]] = []
@@ -2669,53 +2633,23 @@ async def _upload_attachments(
     return autumn_ids, placeholders
 
 
-async def _build_masquerade(
-    author: DCEAuthor,
-    session: aiohttp.ClientSession,
-    state: MigrationState,
-    config: FerryConfig,
-) -> tuple[dict[str, str | None], bool]:
+def _build_masquerade(author: DCEAuthor, state: MigrationState) -> dict[str, str | None]:
     """Build a Stoat masquerade dict for a message author.
 
-    Uploads the author's avatar to Autumn if not already cached.  Avatar upload
-    failures are non-fatal.
+    The picture is the link the avatars phase saved for this author, if there is one. This
+    function never uploads a file, reads one, or asks Discord anything (#1208): a message
+    whose author has no saved link simply carries no ``avatar``.
 
     Args:
         author: Parsed Discord author.
-        session: Active aiohttp session.
-        state: Current migration state (avatar_cache and upload_cache mutated in-place).
-        config: Ferry run configuration.
+        state: Current migration state; ``author_avatar_links`` is read, never written.
 
     Returns:
-        Tuple of (masquerade dict with ``name``, ``avatar`` (URL or None), and
-        ``colour`` (or None), escaped) where escaped is True when the author's
-        local avatar url failed the export-root containment check.
+        Masquerade dict with ``name``, ``avatar`` (only when a link was saved) and ``colour``
+        (only when the author has one).
     """
     name = truncate_name(author.nickname or author.name, author_id=author.id)
-    avatar_url: str | None = None
-    escaped = False
-
-    if author.id in state.avatar_cache:
-        avatar_url = f"{state.autumn_url}/avatars/{state.avatar_cache[author.id]}"
-    elif author.avatar_url and not author.avatar_url.startswith(("http://", "https://")):
-        local = contained_media_path(config.export_dir, author.avatar_url)
-        if local is None:
-            escaped = True
-        elif local.exists():
-            try:
-                file_id = await upload_with_cache(
-                    session,
-                    state.autumn_url,
-                    "avatars",
-                    local,
-                    config.token,
-                    state.upload_cache,
-                    config.upload_delay,
-                )
-                state.avatar_cache[author.id] = file_id
-                avatar_url = f"{state.autumn_url}/avatars/{file_id}"
-            except Exception:  # noqa: BLE001
-                pass  # Avatar upload failure is non-fatal.
+    avatar_url = state.author_avatar_links.get(author.id)
 
     colour: str | None = author.color if author.color else None
 
@@ -2725,4 +2659,4 @@ async def _build_masquerade(
         result["avatar"] = avatar_url
     if colour is not None:
         result["colour"] = colour
-    return result, escaped
+    return result

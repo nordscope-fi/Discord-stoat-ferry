@@ -87,9 +87,9 @@ def test_unsafe_media_path_wording_has_no_em_dash(name: str) -> None:
 
 
 def test_scan_finds_every_known_warning_site() -> None:
-    """Seven messages, eight dict sites (the attachment one is built twice)."""
+    """Five messages, six dict sites (the attachment one is built twice)."""
     total = sum(len(_collect(_MIGRATOR / name)[0]) for name in _FILES)
-    assert total >= 8, f"expected at least 8 unsafe_media_path warning sites, found {total}"
+    assert total >= 6, f"expected at least 6 unsafe_media_path warning sites, found {total}"
 
 
 # ---------------------------------------------------------------------------
