@@ -14,7 +14,7 @@ from discord_ferry.discord.metadata import (
 )
 from discord_ferry.parser.models import DCEChannel, DCEExport, DCEGuild
 from discord_ferry.reporter import compute_fidelity_score, generate_markdown_report, generate_report
-from discord_ferry.state import FailedMessage, MigrationState
+from discord_ferry.state import JOIN_NOTICE_WORDING, FailedMessage, MigrationState
 
 
 def _make_config(tmp_path: Path) -> FerryConfig:
@@ -1340,6 +1340,7 @@ _KNOWN_REPORT_FIELDS = frozenset(
         "invite",
         "native_fidelity",
         "author_pictures",  # Integers keyed by fixed reason codes, so no free text (#1208).
+        "join_notice",  # One of ten fixed outcome codes, or "", so no free text (#1249).
         "permissions",  # Only problems[].guidance is free text, classified by the writer.
     }
 )
@@ -1445,3 +1446,34 @@ def test_markdown_report_masks_a_secret_that_contains_a_tab(tmp_path: Path) -> N
     text = (tmp_path / "migration_report.md").read_text(encoding="utf-8")
     assert "hunter2" not in text
     assert "proxy:" in text
+
+
+def test_report_names_the_join_notice_outcome(tmp_path: Path) -> None:
+    """SC-4.6: report.json carries the code and the markdown carries its fixed wording."""
+    config = _make_config(tmp_path)
+    state = MigrationState(join_notice_outcome="set")
+
+    report = generate_report(config, state, [_make_export()])
+    generate_markdown_report(config, state, [_make_export()])
+
+    assert report["join_notice"] == "set"
+    stored = json.loads((tmp_path / "migration_report.json").read_text(encoding="utf-8"))
+    assert stored["join_notice"] == "set"
+    text = (tmp_path / "migration_report.md").read_text(encoding="utf-8")
+    assert "## Join Notice Channel" in text
+    assert JOIN_NOTICE_WORDING["set"] in text
+
+
+@pytest.mark.parametrize("outcome", ["", "boom hunter2horse"])
+def test_report_for_a_join_notice_that_was_never_decided(tmp_path: Path, outcome: str) -> None:
+    """SC-4.6: an empty or unknown outcome reports "" and the not-recorded sentence."""
+    config = _make_config(tmp_path)
+    state = MigrationState(join_notice_outcome=outcome)
+
+    report = generate_report(config, state, [_make_export()])
+    generate_markdown_report(config, state, [_make_export()])
+
+    assert report["join_notice"] == ""
+    text = (tmp_path / "migration_report.md").read_text(encoding="utf-8")
+    assert "No join channel decision was recorded for this migration." in text
+    assert "hunter2horse" not in text

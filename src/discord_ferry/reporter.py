@@ -15,7 +15,7 @@ from discord_ferry.core.security import (
     strip_control,
 )
 from discord_ferry.discord.metadata import load_bound_discord_metadata
-from discord_ferry.state import AVATAR_REASON_LABELS, author_picture_counts
+from discord_ferry.state import AVATAR_REASON_LABELS, JOIN_NOTICE_WORDING, author_picture_counts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -25,6 +25,10 @@ if TYPE_CHECKING:
     from discord_ferry.discord.metadata import DiscordMetadata
     from discord_ferry.parser.models import DCEExport
     from discord_ferry.state import MigrationState
+
+
+# Shown when no run recorded a join-notice outcome, such as a migration made before 3.9.0.
+_JOIN_NOTICE_UNDECIDED = "No join channel decision was recorded for this migration."
 
 
 def _clamp01(value: float) -> float:
@@ -219,6 +223,10 @@ def generate_report(
     # Integers keyed by fixed reason codes, so there is no free text to redact (#1208).
     report["author_pictures"] = (
         {"skipped": True} if config.skip_avatars else author_picture_counts(state)
+    )
+    # One of the ten fixed outcome codes, or "" when no run decided it, so no free text (#1249).
+    report["join_notice"] = (
+        state.join_notice_outcome if state.join_notice_outcome in JOIN_NOTICE_WORDING else ""
     )
 
     _write_report(config.output_dir, report, config.token_store)
@@ -453,6 +461,9 @@ def generate_markdown_report(
             if code in picture_counts:
                 lines.append(f"| {label} | {picture_counts[code]} |")
         lines.append("")
+
+    lines.append("## Join Notice Channel\n")
+    lines.append(f"{JOIN_NOTICE_WORDING.get(state.join_notice_outcome, _JOIN_NOTICE_UNDECIDED)}\n")
 
     if state.invite_code:
         lines.append("\n## Invite\n")

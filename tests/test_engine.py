@@ -13638,3 +13638,30 @@ async def test_a_resume_after_a_crash_between_the_join_edit_and_the_save_edits_n
 
     assert state.join_notice_outcome == "set"
     assert patches == 1
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_a_resume_past_channels_keeps_the_saved_join_notice_outcome(tmp_path: Path) -> None:
+    """SC-I3: channels is skipped, the server is not touched, the report still says set."""
+    from discord_ferry.state import JOIN_NOTICE_WORDING, save_state
+
+    save_state(
+        MigrationState(
+            current_phase="messages",
+            started_at="2024-01-01T00:00:00+00:00",
+            join_notice_outcome="set",
+        ),
+        tmp_path,
+    )
+    config = _make_config(tmp_path, resume=True)
+
+    with aioresponses() as m:
+        state = await run_migration(config, lambda event: None, phase_overrides=_NOOP_OVERRIDES)
+        server_requests = [key for key in m.requests if "/servers/" in str(key[1])]
+
+    assert server_requests == []
+    assert state.join_notice_outcome == "set"
+    report = json.loads((tmp_path / "migration_report.json").read_text(encoding="utf-8"))
+    assert report["join_notice"] == "set"
+    markdown = (tmp_path / "migration_report.md").read_text(encoding="utf-8")
+    assert JOIN_NOTICE_WORDING["set"] in markdown
