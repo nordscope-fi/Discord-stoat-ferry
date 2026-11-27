@@ -1062,6 +1062,108 @@ async def test_no_banner_hash() -> None:
     assert meta.banner_hash == ""
 
 
+async def _fetch_with_guild_fields(guild_fields: dict[str, object]) -> DiscordMetadata:
+    """Run the real fetch against a mocked Discord guild object with these extra fields."""
+    from aioresponses import aioresponses
+
+    guild = {"id": _GUILD_ID, "name": "Test Guild", **guild_fields}
+    with aioresponses() as m:
+        m.get(f"{_DISCORD_API}/guilds/{_GUILD_ID}", payload=guild)
+        m.get(f"{_DISCORD_API}/guilds/{_GUILD_ID}/roles", payload=[])
+        m.get(f"{_DISCORD_API}/guilds/{_GUILD_ID}/channels", payload=[])
+        async with aiohttp.ClientSession() as session:
+            return await fetch_and_translate_guild_metadata(session, "test-token", _GUILD_ID)
+
+
+async def test_system_channel_fields_are_captured_from_the_guild_object() -> None:
+    """SC-3.1: the join-notice channel id and the flags come from the guild object."""
+    meta = await _fetch_with_guild_fields({"system_channel_id": "100", "system_channel_flags": 5})
+    assert meta.system_channel_id == "100"
+    assert meta.system_channel_flags == 5
+
+
+@pytest.mark.parametrize(
+    ("guild_fields", "expected_id", "expected_flags"),
+    [
+        ({"system_channel_id": None, "system_channel_flags": None}, "", 0),
+        ({"system_channel_id": "abc", "system_channel_flags": "x"}, "", 0),
+        ({"system_channel_id": "../1"}, "", 0),
+        ({"system_channel_id": 12345}, "", 0),
+        ({"system_channel_id": "100", "system_channel_flags": True}, "100", 0),
+        ({"system_channel_id": "100", "system_channel_flags": -1}, "100", 0),
+        ({}, "", 0),
+    ],
+)
+async def test_malformed_system_channel_values_from_discord_are_kept_out(
+    guild_fields: dict[str, object], expected_id: str, expected_flags: int
+) -> None:
+    """SC-3.2: null, a non-snowflake, a wrong type or a missing key never raises."""
+    meta = await _fetch_with_guild_fields(guild_fields)
+    assert meta.system_channel_id == expected_id
+    assert meta.system_channel_flags == expected_flags
+
+
+@pytest.mark.parametrize("system_channel_id", ["100", "", None])
+def test_system_channel_fields_round_trip_through_the_saved_file(
+    tmp_path: Path, system_channel_id: str | None
+) -> None:
+    """SC-3.3: both fields survive save then load, and "not recorded" stays not recorded."""
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="2026-11-27T00:00:00+00:00",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        system_channel_id=system_channel_id,
+        system_channel_flags=5,
+    )
+    save_discord_metadata(meta, tmp_path)
+    loaded = load_discord_metadata(tmp_path)
+    assert loaded is not None
+    assert loaded.system_channel_id == system_channel_id
+    assert loaded.system_channel_flags == 5
+
+
+def test_a_metadata_file_from_an_older_ferry_loads_as_not_recorded(tmp_path: Path) -> None:
+    """SC-3.4 (load half): without the keys, the id is None and the flags are 0."""
+    legacy = {
+        "guild_id": "123",
+        "fetched_at": "2026-06-23T00:00:00+00:00",
+        "server_default_permissions": 0,
+        "role_permissions": {},
+        "channel_metadata": {},
+    }
+    (tmp_path / "discord_metadata.json").write_text(json.dumps(legacy))
+    loaded = load_discord_metadata(tmp_path)
+    assert loaded is not None
+    assert loaded.system_channel_id is None
+    assert loaded.system_channel_flags == 0
+
+
+@pytest.mark.parametrize("bad_flags", ["1", [1], True, -3, 1.5])
+def test_hand_edited_system_channel_flags_load_as_zero(tmp_path: Path, bad_flags: object) -> None:
+    """SC-3.5: a flags value that is not a whole number cannot reach the bit test."""
+    meta = DiscordMetadata("111", "t", 0, {}, {}, system_channel_id="100")
+    raw = _meta_to_dict(meta)
+    raw["system_channel_flags"] = bad_flags
+    (tmp_path / "discord_metadata.json").write_text(json.dumps(raw))
+    loaded = load_discord_metadata(tmp_path)
+    assert loaded is not None
+    assert loaded.system_channel_flags == 0
+
+
+@pytest.mark.parametrize("bad_id", ["abc", "../1", 12345, ["1"]])
+def test_hand_edited_system_channel_id_loads_as_no_channel(tmp_path: Path, bad_id: object) -> None:
+    """SC-3.5: an id that is not a snowflake string reads as "" (none), never as an error."""
+    meta = DiscordMetadata("111", "t", 0, {}, {}, system_channel_id="100")
+    raw = _meta_to_dict(meta)
+    raw["system_channel_id"] = bad_id
+    (tmp_path / "discord_metadata.json").write_text(json.dumps(raw))
+    loaded = load_discord_metadata(tmp_path)
+    assert loaded is not None
+    assert loaded.system_channel_id == ""
+
+
 def test_batch2_fields_round_trip():
     meta = DiscordMetadata(
         guild_id="g1",

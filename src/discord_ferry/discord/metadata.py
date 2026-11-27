@@ -100,6 +100,10 @@ class DiscordMetadata:
     guild_nsfw: bool = False
     permission_source: PermissionSourceEvidence | None = None
     guild_emojis: tuple[GuildEmojiMeta, ...] = ()
+    # The Discord join-notice channel (#1249). "" means Discord has none, None means the file
+    # was saved by a Ferry that did not record it. Only a snowflake or "" is ever stored.
+    system_channel_id: str | None = None
+    system_channel_flags: int = 0
 
 
 _PERMISSION_TRANSLATION_VERSION = "discord-to-stoat-v1"
@@ -132,6 +136,25 @@ def capture_guild_emojis(raw: object) -> tuple[GuildEmojiMeta, ...]:
             continue
         captured.append(GuildEmojiMeta(emoji_id, name, animated, available))
     return tuple(captured)
+
+
+def capture_system_channel_id(raw: object) -> str:
+    """The join-notice channel id from a Discord guild object, or "" when there is none.
+
+    Discord sends null when no channel is set. A value that is not a snowflake string is
+    treated the same way, so a malformed response or a hand-edited file cannot reach a lookup.
+    """
+    return raw if isinstance(raw, str) and _SNOWFLAKE.fullmatch(raw) else ""
+
+
+def capture_system_channel_flags(raw: object) -> int:
+    """The guild's ``system_channel_flags``, or 0 when it is not a non-negative whole number."""
+    return raw if type(raw) is int and raw >= 0 else 0
+
+
+def _load_system_channel_id(raw: object) -> str | None:
+    """None when the saved file has no value (an older Ferry), else a snowflake or ""."""
+    return None if raw is None else capture_system_channel_id(raw)
 
 
 def _capture_source_channel(channel: DiscordChannel) -> SourceChannel:
@@ -528,7 +551,10 @@ def _meta_to_dict(meta: DiscordMetadata) -> dict[str, Any]:
             }
             for emoji in meta.guild_emojis
         ],
+        "system_channel_flags": meta.system_channel_flags,
     }
+    if meta.system_channel_id is not None:
+        data["system_channel_id"] = meta.system_channel_id
     if meta.permission_source is not None:
         data["permission_source"] = _permission_source_to_dict(meta.permission_source)
     return data
@@ -601,6 +627,8 @@ def _dict_to_meta(data: dict[str, Any]) -> DiscordMetadata:
         guild_nsfw=data.get("guild_nsfw", False),
         permission_source=_dict_to_permission_source(data.get("permission_source")),
         guild_emojis=capture_guild_emojis(data.get("guild_emojis", [])),
+        system_channel_id=_load_system_channel_id(data.get("system_channel_id")),
+        system_channel_flags=capture_system_channel_flags(data.get("system_channel_flags", 0)),
     )
 
 
