@@ -660,7 +660,6 @@ async def run_migration(
             state.pending_emoji_rewrites = {
                 k: dict(v) for k, v in prior.pending_emoji_rewrites.items()
             }
-            state.avatar_cache = dict(prior.avatar_cache)
             state.author_names = dict(prior.author_names)
             state.upload_cache = dict(prior.upload_cache)
             state.message_map = dict(prior.message_map)
@@ -709,7 +708,7 @@ async def run_migration(
             #     skips creation, so nothing re-records its name; omitting these
             #     makes ferry check report ok for a renamed channel),
             #     created_emoji_names (same reason, for emoji),
-            #     category_names, channel_categories, message_map, avatar_cache,
+            #     category_names, channel_categories, message_map,
             #     upload_cache, author_names, stoat_server_id, autumn_url,
             #     invite_code / invite_url, channel_message_offsets,
             #     channel_high_water (durable per-channel high-water mark for
@@ -735,6 +734,9 @@ async def run_migration(
             #     / merge_duplicates_suppressed (per-run merge counter, #239);
             #     (per-run fidelity counters); current_phase, started_at,
             #     completed_at, export_completed, rollback_progress, is_dry_run;
+            #     author_avatar_links / author_avatar_reasons (every author is looked up
+            #     again each run, so a changed picture is picked up and a reason that
+            #     depended on the token is retried, #1208);
             #     thread_strategy, which describes THIS run and is set from
             #     config after this block, at the point the four state paths
             #     converge.
@@ -1427,6 +1429,11 @@ async def _run_phases(
         # Check config skip flags
         skip_attr = _SKIPPABLE.get(phase_name)
         if skip_attr and getattr(config, skip_attr, False):
+            if phase_name == "avatars":
+                # Skipping pictures means no picture on any message (#1208), so links an
+                # earlier run of this migration saved must not reach the messages phase.
+                state.author_avatar_links.clear()
+                state.author_avatar_reasons.clear()
             on_event(
                 MigrationEvent(phase=phase_name, status="skipped", message="Skipped by config")
             )

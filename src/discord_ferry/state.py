@@ -249,9 +249,6 @@ class MigrationState:
     # only, never free text, so it is structural and NOT in _TEXT_MEMBERS.
     pending_emoji_rewrites: dict[str, dict[str, str]] = field(default_factory=dict)
 
-    # Author ID -> uploaded Autumn avatar ID
-    avatar_cache: dict[str, str] = field(default_factory=dict)
-
     # Author ID -> picture link on Discord's own picture host (#1208). Written once per
     # author by the avatars phase. Every link passed remote_media_refusal and a path check,
     # so it holds no free text and stays out of _TEXT_MEMBERS.
@@ -879,7 +876,7 @@ def load_state(output_dir: Path) -> MigrationState:
 #     `forum-index-<key>` in channel_map and `forum-<name>` in category_map.
 #
 # A dry-run state also holds `dry-<kind>-<id>` placeholders, written by structure.py,
-# messages.py and avatars.py. Nothing is ever sent to them: resume, retry, rollback,
+# structure.py and messages.py. Nothing is ever sent to them: resume, retry, rollback,
 # check and repair (through check) all refuse a dry-run state. They are still held to
 # the exact shapes Ferry writes, so a hand-edited value cannot carry `/`, `?` or `%`
 # into a request path. Category placeholders hold a forum name (`dry-cat-forum-<name>`)
@@ -1136,7 +1133,6 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "message_map": state.message_map,
         "emoji_map": state.emoji_map,
         "pending_emoji_rewrites": state.pending_emoji_rewrites,
-        "avatar_cache": state.avatar_cache,
         "author_avatar_links": state.author_avatar_links,
         "author_avatar_reasons": state.author_avatar_reasons,
         "upload_cache": state.upload_cache,
@@ -1232,7 +1228,6 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             message_map=data.get("message_map", {}),
             emoji_map=data.get("emoji_map", {}),
             pending_emoji_rewrites=data.get("pending_emoji_rewrites", {}),
-            avatar_cache=data.get("avatar_cache", {}),
             author_avatar_links=data.get("author_avatar_links", {}),
             author_avatar_reasons=data.get("author_avatar_reasons", {}),
             upload_cache=data.get("upload_cache", {}),
