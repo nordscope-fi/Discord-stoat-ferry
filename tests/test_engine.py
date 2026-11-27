@@ -5537,7 +5537,11 @@ async def test_rebuild_one_forum_index_matches_loop(tmp_path: Path) -> None:
 @pytest.mark.usefixtures("forum_permission_unit_boundary")
 @pytest.mark.parametrize(("force_new", "phase"), [(False, "report"), (True, "repair")])
 async def test_forum_index_slowmode_wait_reports_rebuild_context(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force_new: bool, phase: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recorded_sleeps: list[float],
+    force_new: bool,
+    phase: str,
 ) -> None:
     """Both rebuilt forum-index sends report the phase and index-channel name."""
     from discord_ferry.migrator.delivery import DeliveryResult
@@ -5591,6 +5595,8 @@ async def test_forum_index_slowmode_wait_reports_rebuild_context(
             {"kind": "slowmode_wait", "retry_after_seconds": 29},
         )
     ]
+    # The handler still waits the 29 s it reported, now against a recorded sleep.
+    assert 29 in recorded_sleeps
 
 
 @pytest.mark.usefixtures("forum_permission_unit_boundary")
@@ -8818,7 +8824,7 @@ async def test_a_recreated_channels_new_id_lands_under_the_unchanged_key(
 @pytest.mark.usefixtures("publication_permission_collaborator")
 @pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_the_recreated_channels_stale_per_channel_state_is_cleared(
-    tmp_path: Path,
+    tmp_path: Path, recorded_sleeps: list[float]
 ) -> None:
     """The four Discord-keyed entries that described the channel that is gone."""
     export = _export_for(R_D_CHANNEL)
@@ -8841,7 +8847,9 @@ async def test_the_recreated_channels_stale_per_channel_state_is_cleared(
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
 @pytest.mark.usefixtures("repair_permission_unit_boundary")
-async def test_only_this_channels_message_map_entries_are_dropped(tmp_path: Path) -> None:
+async def test_only_this_channels_message_map_entries_are_dropped(
+    tmp_path: Path, recorded_sleeps: list[float]
+) -> None:
     """The scan is channel-scoped, so another channel's entries survive.
 
     A message_map wiped wholesale would strand every reply reference in the
@@ -9109,7 +9117,7 @@ async def test_a_non_numeric_message_id_does_not_break_the_mark(tmp_path: Path) 
 
 
 async def test_resend_header_reports_slowmode_and_keeps_export_name(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded_sleeps: list[float]
 ) -> None:
     """A repair header reports its wait and ordinary resend keeps its source name."""
     from discord_ferry.migrator.delivery import DeliveryResult
@@ -9157,6 +9165,7 @@ async def test_resend_header_reports_slowmode_and_keeps_export_name(
             {"kind": "slowmode_wait", "retry_after_seconds": 29},
         )
     ]
+    assert 29 in recorded_sleeps
 
 
 async def test_repair_tail_passes_export_name_to_message_delivery(

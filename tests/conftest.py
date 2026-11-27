@@ -115,6 +115,27 @@ def _unstarted_nicegui_app(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
+def recorded_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replace `asyncio.sleep` with a recorder that yields once and returns.
+
+    A test that needs a real Stoat delay (a slowmode cooldown, the circuit
+    breaker pause, a retry backoff) to happen, but not to take that long, uses
+    this. The list holds every requested delay, so the test can still assert
+    the delay the code asked for.
+    """
+    real_sleep = asyncio.sleep
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float, result: object = None) -> object:
+        delays.append(delay)
+        await real_sleep(0)
+        return result
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    return delays
+
+
+@pytest.fixture
 def fixtures_dir() -> Path:
     """Return the path to the test fixtures directory."""
     return FIXTURES_DIR
