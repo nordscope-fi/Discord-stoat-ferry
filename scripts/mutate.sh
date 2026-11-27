@@ -85,7 +85,7 @@ if old not in s:
     sys.exit(f"self-test target not found in {p}: {old!r}. The file changed; update mutate.sh.")
 open(p, "w").write(s.replace(old, new, 1))
 PY
-if uv run --extra mutation pytest "$SUITE" -q >/dev/null 2>&1; then
+if uv run --extra mutation pytest -n 0 "$SUITE" -q >/dev/null 2>&1; then
   restore; trap - EXIT
   selftest_fail "an observable mutation did NOT fail the suite"
 fi
@@ -104,7 +104,7 @@ if "#" not in s:
 i = s.index("#")
 open(p, "w").write(s[:i] + "#  harness self-test, reverted immediately" + s[i + 1:])
 PY
-if ! uv run --extra mutation pytest "$SUITE" -q >/dev/null 2>&1; then
+if ! uv run --extra mutation pytest -n 0 "$SUITE" -q >/dev/null 2>&1; then
   restore; trap - EXIT
   selftest_fail "an unobservable mutation DID fail the suite"
 fi
