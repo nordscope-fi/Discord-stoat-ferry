@@ -1,7 +1,7 @@
 """Guard: the unsafe_media_path warning wording carries no em dash (#1081).
 
 The property is the literal text of the operator-facing strings, so this scans the
-four migrator modules that emit them. It collects every ``unsafe_media_path`` warning
+three migrator modules that emit them. It collects every ``unsafe_media_path`` warning
 message (including a message held in a local variable) and every companion progress
 event that uses the same "unsafe path" or "containment check" wording.
 """
@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 _MIGRATOR = Path(__file__).resolve().parent.parent / "src" / "discord_ferry" / "migrator"
-_FILES = ("avatars.py", "emoji.py", "structure.py", "messages.py")
+_FILES = ("emoji.py", "structure.py", "messages.py")
 _EM_DASH = "—"
 _MARKERS = ("containment check", "unsafe path")
 
@@ -87,9 +87,9 @@ def test_unsafe_media_path_wording_has_no_em_dash(name: str) -> None:
 
 
 def test_scan_finds_every_known_warning_site() -> None:
-    """Eight messages, nine dict sites (the attachment one is built twice)."""
+    """Seven messages, eight dict sites (the attachment one is built twice)."""
     total = sum(len(_collect(_MIGRATOR / name)[0]) for name in _FILES)
-    assert total >= 9, f"expected at least 9 unsafe_media_path warning sites, found {total}"
+    assert total >= 8, f"expected at least 8 unsafe_media_path warning sites, found {total}"
 
 
 # ---------------------------------------------------------------------------

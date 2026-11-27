@@ -1,10 +1,11 @@
-"""Validation probe for audit issue #956 (avatar download destination).
+"""Validation probe for audit issue #956 (avatar phase writes).
 
 Runs inside the same OS-enforced sandbox as probe_955: no network,
-scratch-only writes, empty allowlisted environment. The HTTP response is a
-local mock; no service is contacted. Exit code 0 means a crafted author id
-wrote nothing outside output_dir/avatars and left the outside marker
-byte-identical; exit code 1 means regression.
+scratch-only writes, empty allowlisted environment. No service is contacted.
+The avatars phase no longer downloads or writes any file (#1208), so this probe
+now checks that a crafted author id still leaves the outside marker
+byte-identical and creates nothing outside the scratch case files. Exit code 0
+means no write escaped; exit code 1 means regression.
 """
 
 from __future__ import annotations
@@ -15,10 +16,9 @@ import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 from discord_ferry.config import FerryConfig
-from discord_ferry.migrator.avatars import _download_remote_avatar, run_avatars
+from discord_ferry.migrator.avatars import run_avatars
 from discord_ferry.state import MigrationState
 
 SCRATCH = Path(os.environ["PROBE_SCRATCH"]) / "v956"
@@ -28,43 +28,8 @@ MARKER = (SCRATCH / "outside-marker.png").resolve()
 ORIGINAL = "MARKER-956-ORIGINAL"
 
 
-class FakeResp:
-    status = 200
-    headers = {"Content-Type": "image/png"}
-
-    async def read(self) -> bytes:
-        return b"PNG-DUMMY-BYTES"
-
-    async def __aenter__(self) -> FakeResp:
-        return self
-
-    async def __aexit__(self, *exc: object) -> bool:
-        return False
-
-
-class FakeSession:
-    requests: list[str] = []
-
-    def get(self, url: str, timeout: object = None) -> FakeResp:
-        self.requests.append(url)
-        return FakeResp()
-
-
 def noop(event: object) -> None:
     pass
-
-
-async def record_upload(
-    session: object,
-    autumn_url: str,
-    tag: str,
-    path: Path,
-    token: str,
-    cache: dict[str, str],
-    delay: float,
-    **kw: object,
-) -> str:
-    return f"autumn-dummy-{Path(path).name}"
 
 
 def setup() -> None:
@@ -108,26 +73,6 @@ def write_case(author_id: str) -> Path:
     return path
 
 
-async def direct_download(author_id: str) -> dict[str, object]:
-    MARKER.write_text(ORIGINAL)
-    before = MARKER.read_text()
-    dest, reason = await _download_remote_avatar(
-        FakeSession(), "https://cdn.discordapp.com/a.png", OUT, author_id
-    )
-    after = MARKER.read_text()
-    return {
-        "case": "direct-download",
-        "author_id": author_id,
-        "dest": str(dest) if dest else None,
-        "dest_resolved": str(dest.resolve()) if dest else None,
-        "escapes_avatars_root": bool(dest) and not dest.resolve().is_relative_to(AVATARS),
-        "reason": reason,
-        "marker_before": before,
-        "marker_after": after,
-        "marker_overwritten": after != ORIGINAL,
-    }
-
-
 async def phase_download(author_id: str) -> dict[str, object]:
     MARKER.write_text(ORIGINAL)
     before = MARKER.read_text()
@@ -141,17 +86,15 @@ async def phase_download(author_id: str) -> dict[str, object]:
         output_dir=OUT,
         message_rate_limit=0.0,
         upload_delay=0.0,
-        session=FakeSession(),
         pause_event=asyncio.Event(),
         cancel_event=asyncio.Event(),
     )
     error = ""
-    with patch("discord_ferry.migrator.avatars.upload_with_cache", record_upload):
-        try:
-            exports = [SimpleNamespace(json_path=case_file, messages=[])]
-            await run_avatars(config, state, exports, noop)
-        except Exception as exc:  # noqa: BLE001
-            error = f"{type(exc).__name__}: {exc}"
+    try:
+        exports = [SimpleNamespace(json_path=case_file, messages=[])]
+        await run_avatars(config, state, exports, noop)
+    except Exception as exc:  # noqa: BLE001
+        error = f"{type(exc).__name__}: {exc}"
     after = MARKER.read_text()
     return {
         "case": "avatar-phase",
@@ -167,12 +110,11 @@ async def phase_download(author_id: str) -> dict[str, object]:
 async def main() -> int:
     setup()
     results: list[dict[str, object]] = []
-    for author_id in ("../../outside-marker", str(MARKER.with_suffix("")), "1234567890"):
-        results.append(await direct_download(author_id))
-    MARKER.write_text(ORIGINAL)
     for author_id in ("../../outside-marker", "1234567890"):
         results.append(await phase_download(author_id))
-    escapes = [r for r in results if r.get("escapes_avatars_root") or r.get("marker_overwritten")]
+    escapes = [
+        r for r in results if r.get("marker_overwritten") or r.get("writes_outside_avatars_root")
+    ]
     summary = {
         "issue": 956,
         "avatars_root": str(AVATARS),

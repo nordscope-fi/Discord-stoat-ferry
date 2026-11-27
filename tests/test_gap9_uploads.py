@@ -19,7 +19,6 @@ from discord_ferry.discord.client import download_role_icon
 from discord_ferry.errors import AutumnUploadError, MigrationError
 from discord_ferry.migrator import delivery as delivery_module
 from discord_ferry.migrator import messages as messages_module
-from discord_ferry.migrator.avatars import _download_remote_avatar
 from discord_ferry.migrator.emoji import upload_and_create_emoji
 from discord_ferry.migrator.messages import _upload_attachments
 from discord_ferry.migrator.structure import _download_banner, run_server
@@ -406,29 +405,17 @@ async def test_advertised_limits_reach_all_download_and_upload_prechecks(
     assert attachment_ids == []
     assert placeholders
 
-    avatar_url = "https://cdn.discordapp.com/avatars/user/hash.png"
     role_icon_url = "https://cdn.discordapp.com/role-icons/role/hash.png"
     banner_url = "https://cdn.discordapp.com/banners/guild/hash.png"
     banner_path = tmp_path / "banners" / "guild.png"
     banner_path.parent.mkdir()
     with aioresponses() as mocked:
-        mocked.get(
-            avatar_url,
-            body=b"four",
-            status=200,
-            headers={"Content-Type": "image/png"},
-        )
         mocked.get(role_icon_url, body=b"four", status=200)
         mocked.get(banner_url, body=b"four", status=200)
         async with aiohttp.ClientSession() as session:
-            avatar_path, reason = await _download_remote_avatar(
-                session, avatar_url, tmp_path, "author-1"
-            )
             role_icon = await download_role_icon(session, "role", "hash")
             banner_failure = await _download_banner(session, banner_url, banner_path)
 
-    assert avatar_path is None
-    assert "3 byte limit" in reason
     assert role_icon is None
     assert banner_failure == "Banner is larger than the 3 byte limit"
 

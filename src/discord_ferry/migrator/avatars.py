@@ -1,28 +1,23 @@
-"""Phase 7.5: AVATARS — Pre-flight avatar download and Autumn upload."""
+"""Phase 7.5: AVATARS, resolve each author's picture link once, before messages."""
 
 from __future__ import annotations
 
 import logging
-import mimetypes
 import re
-import time
-from pathlib import Path, PurePosixPath
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
-from urllib.parse import urlsplit
 
-import aiohttp
 from yarl import URL
 
-from discord_ferry.core.atomicio import ensure_output_subdir, write_bytes_no_follow
 from discord_ferry.core.events import MigrationEvent
-from discord_ferry.core.http import read_bounded, remote_media_refusal
-from discord_ferry.migrator.api import get_session
+from discord_ferry.core.http import new_session, remote_media_refusal
+from discord_ferry.discord.client import fetch_user
+from discord_ferry.errors import DiscordAuthError, DiscordForbiddenError, MigrationError
 from discord_ferry.parser.dce_parser import stream_messages
-from discord_ferry.parser.media_paths import contained_media_path, is_safe_filename_component
-from discord_ferry.state import save_state
-from discord_ferry.uploader.autumn import get_tag_size_limit, upload_with_cache
 
 if TYPE_CHECKING:
+    import aiohttp
+
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
     from discord_ferry.parser.models import DCEAuthor, DCEExport
@@ -91,17 +86,6 @@ def lookup_avatar_link(user_id: str, avatar_hash: object) -> str | None:
     return f"{_DISCORD_CDN}/avatars/{user_id}/{avatar_hash}.{extension}"
 
 
-def _avatar_extension(content_type: str, url: str) -> str:
-    """Choose an avatar filename extension from its image type or URL path."""
-    media_type = content_type.partition(";")[0].strip().lower()
-    content_type_extension = mimetypes.guess_extension(media_type)
-    if content_type_extension:
-        return content_type_extension
-
-    url_path = PurePosixPath(urlsplit(url).path)
-    return url_path.suffix or ".webp"
-
-
 def _collect_unique_authors(exports: list[DCEExport]) -> dict[str, DCEAuthor]:
     """Scan all messages across all exports and return unique authors.
 
@@ -124,77 +108,94 @@ def _collect_unique_authors(exports: list[DCEExport]) -> dict[str, DCEAuthor]:
     return authors
 
 
-async def _download_remote_avatar(
-    session: aiohttp.ClientSession,
-    url: str,
-    output_dir: Path,
-    author_id: str,
-) -> tuple[Path | None, str]:
-    """Download a remote avatar image and save it locally.
+@dataclass
+class _Lookups:
+    """Run-wide Discord lookup bookkeeping.
 
-    Args:
-        session: An active aiohttp ClientSession.
-        url: Remote URL of the avatar image.
-        output_dir: Base output directory (avatars saved to ``output_dir/avatars/``).
-        author_id: Discord author ID, used as the filename stem.
-
-    Returns:
-        Tuple of (path to downloaded file or ``None``, failure reason or empty
-        string on success).
+    ``stopped_reason`` is set once Discord has shown that every later lookup would fail the
+    same way. ``succeeded`` counts lookups Discord answered, which decides whether a 403 means
+    "this token cannot use the route" (none yet) or "this one author" (some already worked).
     """
-    if not is_safe_filename_component(author_id):
-        return None, f"unsafe author id {author_id!r}"
-    # The URL is export text. Only an https Discord CDN address is fetched, so an
-    # export cannot point Ferry at a private or loopback address and have the
-    # response uploaded to the Stoat media service (#965).
-    refusal = remote_media_refusal(url)
-    if refusal is not None:
-        logger.warning("Refused to download an avatar: %s", refusal)
-        return None, f"avatar URL refused ({refusal})"
+
+    stopped_reason: str | None = None
+    succeeded: int = 0
+
+
+def _record_link(state: MigrationState, author_id: str, link: str) -> None:
+    state.author_avatar_reasons.pop(author_id, None)
+    state.author_avatar_links[author_id] = link
+
+
+def _record_reason(state: MigrationState, author_id: str, reason: str) -> None:
+    state.author_avatar_links.pop(author_id, None)
+    state.author_avatar_reasons[author_id] = reason
+
+
+def _settle_link(state: MigrationState, author_id: str, link: str) -> None:
+    """Save ``link``, or ``link_too_long`` when Stoat would refuse the masquerade."""
+    if len(link) > AVATAR_LINK_MAX_LENGTH:
+        _record_reason(state, author_id, "link_too_long")
+    else:
+        _record_link(state, author_id, link)
+
+
+async def _lookup_picture(
+    session: aiohttp.ClientSession, token: str, author_id: str, lookups: _Lookups
+) -> tuple[str | None, str]:
+    """Ask Discord for one author's picture.
+
+    Returns ``(link, "")`` on success, or ``(None, reason_code)``. Discord's error text is
+    never read here, so it cannot reach state, a log line or the report.
+    """
+    if lookups.stopped_reason is not None:
+        return None, lookups.stopped_reason
     try:
-        # No redirects: the CDN answers directly, and a 3xx would send the
-        # download to a host Ferry never chose.
-        async with session.get(
-            url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=False
-        ) as resp:
-            if resp.status != 200:
-                logger.warning("Avatar download returned status %d for %s", resp.status, url)
-                return None, f"HTTP {resp.status}"
+        user = await fetch_user(session, token, author_id)
+    except DiscordAuthError:
+        lookups.stopped_reason = "token_rejected"
+        return None, "token_rejected"
+    except DiscordForbiddenError:
+        if lookups.succeeded == 0:
+            lookups.stopped_reason = "lookup_not_allowed"
+            return None, "lookup_not_allowed"
+        return None, "lookup_failed"
+    except (MigrationError, TimeoutError):
+        # A request that outlasts the session's total timeout raises a plain TimeoutError,
+        # which the client's retry loop does not convert. It costs this author only.
+        return None, "lookup_failed"
+    lookups.succeeded += 1
+    avatar_hash = user.get("avatar")
+    if avatar_hash is None:
+        return None, "no_picture"
+    link = lookup_avatar_link(author_id, avatar_hash)
+    if link is None:
+        return None, "lookup_failed"
+    return link, ""
 
-            content_type = resp.headers.get("Content-Type", "")
-            if not content_type.startswith("image/"):
-                logger.warning(
-                    "Avatar URL returned non-image Content-Type '%s' for %s",
-                    content_type,
-                    url,
-                )
-                return None, f"non-image Content-Type '{content_type}'"
 
-            # Use the response image type first. If it is not recognised, use the
-            # parsed URL path, which excludes untrusted query strings and fragments.
-            ext = _avatar_extension(content_type, url)
-
-            avatar_dir = output_dir / "avatars"
-            ensure_output_subdir(avatar_dir, output_dir)
-            dest = avatar_dir / f"{author_id}{ext}"
-            # Compare against the resolved output root so a symlinked avatars
-            # directory cannot redirect the write outside output_dir.
-            if not dest.resolve().is_relative_to(output_dir.resolve() / "avatars"):
-                return None, "avatar download destination escapes the avatars folder"
-
-            # Read in full, within the Autumn avatars limit, before ``dest`` is
-            # touched: an oversize body or a dropped connection writes nothing.
-            limit = get_tag_size_limit("avatars")
-            data = await read_bounded(resp, limit)
-            if data is None:
-                logger.warning("Avatar at %s is larger than the %d byte limit", url, limit)
-                return None, f"larger than the {limit} byte limit"
-            # Refuses a link planted at ``dest`` after the check above (#960).
-            write_bytes_no_follow(dest, data)
-            return dest, ""
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to download avatar from %s: %s", url, exc)
-        return None, str(exc)
+async def _resolve_author(
+    config: FerryConfig,
+    state: MigrationState,
+    session: aiohttp.ClientSession,
+    author: DCEAuthor,
+    lookups: _Lookups,
+) -> None:
+    """Save either a picture link or a reason code for one author."""
+    kind, export_link = classify_export_link(author.avatar_url)
+    if kind == "unusable":
+        _record_reason(state, author.id, "export_link_unusable")
+        return
+    if kind == "link":
+        _settle_link(state, author.id, export_link)
+        return
+    if not config.discord_token:
+        _record_reason(state, author.id, "no_discord_token")
+        return
+    link, reason = await _lookup_picture(session, config.discord_token, author.id, lookups)
+    if link is not None:
+        _settle_link(state, author.id, link)
+    else:
+        _record_reason(state, author.id, reason)
 
 
 async def run_avatars(
@@ -203,172 +204,31 @@ async def run_avatars(
     exports: list[DCEExport],
     on_event: EventCallback,
 ) -> None:
-    """Upload unique author avatars to Autumn before message migration.
+    """Resolve each unique author's picture link before message migration.
+
+    Every author ends in exactly one of ``state.author_avatar_links`` (a link on Discord's
+    picture host, at most 256 characters) or ``state.author_avatar_reasons`` (a fixed code).
+    Nothing is uploaded to Autumn, no local file is read, and nothing is sent to Stoat. A dry
+    run does the same lookups, as the Discord metadata fetch does.
 
     Args:
-        config: Ferry configuration (provides export_dir, stoat_url, token, upload_delay,
-            output_dir).
-        state: Migration state; ``avatar_cache`` will be populated with author_id -> Autumn ID.
+        config: Ferry configuration (``discord_token`` enables lookups).
+        state: Migration state; the two author picture maps are filled in.
         exports: Parsed DCE exports to scan for unique authors.
         on_event: Event callback for progress reporting.
     """
     on_event(
-        MigrationEvent(phase="avatars", status="started", message="Scanning exports for avatars")
+        MigrationEvent(phase="avatars", status="started", message="Scanning exports for authors")
     )
-
-    # Step 1: Collect unique authors across all exports.
-    all_authors = _collect_unique_authors(exports)
-
-    # Step 2: Filter out authors with empty avatar_url.
-    authors_with_avatar = {aid: author for aid, author in all_authors.items() if author.avatar_url}
-
-    # Step 3: Filter out authors already in cache.
-    to_upload = {
-        aid: author for aid, author in authors_with_avatar.items() if aid not in state.avatar_cache
-    }
-
-    if not to_upload:
-        on_event(
-            MigrationEvent(
-                phase="avatars",
-                status="completed",
-                message="No unique avatars found.",
-            )
-        )
-        return
-
-    total = len(to_upload)
-
-    if config.dry_run:
-        for author_id in to_upload:
-            state.avatar_cache[author_id] = f"dry-avatar-{author_id}"
-        on_event(
-            MigrationEvent(
-                phase="avatars",
-                status="completed",
-                message=f"[DRY RUN] Mapped {total} avatars",
-            )
-        )
-        return
-    uploaded = 0
-    failed = 0
-    _last_save_time = time.monotonic()
-
-    # Sort deterministically by author ID.
-    sorted_authors = sorted(to_upload.items(), key=lambda item: item[0])
-
+    authors = sorted(_collect_unique_authors(exports).items(), key=lambda item: item[0])
+    lookups = _Lookups()
+    async with new_session() as session:
+        for _author_id, author in authors:
+            await _resolve_author(config, state, session, author, lookups)
     on_event(
         MigrationEvent(
             phase="avatars",
-            status="progress",
-            message=f"Found {total} unique avatars to upload",
-            current=0,
-            total=total,
+            status="completed",
+            message=f"Resolved pictures for {len(authors)} authors.",
         )
     )
-
-    async with get_session(config) as session:
-        for idx, (author_id, author) in enumerate(sorted_authors, start=1):
-            on_event(
-                MigrationEvent(
-                    phase="avatars",
-                    status="progress",
-                    message=f"Uploading avatar {idx} of {total}",
-                    current=idx,
-                    total=total,
-                )
-            )
-
-            avatar_url = author.avatar_url
-            file_path: Path | None = None
-
-            try:
-                if avatar_url.startswith("http://") or avatar_url.startswith("https://"):
-                    # Remote URL — download first.
-                    file_path, fail_reason = await _download_remote_avatar(
-                        session, avatar_url, config.output_dir, author_id
-                    )
-                    if file_path is None:
-                        warn_type = (
-                            "unsafe_media_path"
-                            if fail_reason.startswith("unsafe author id")
-                            or fail_reason.startswith("avatar download destination")
-                            else "avatar_download_failed"
-                        )
-                        state.warnings.append(
-                            {
-                                "phase": "avatars",
-                                "type": warn_type,
-                                "message": (
-                                    f"Failed to download avatar for {author.name} ({fail_reason})"
-                                ),
-                            }
-                        )
-                        failed += 1
-                        continue
-                else:
-                    # Local path — resolve against export_dir.
-                    file_path = contained_media_path(config.export_dir, avatar_url)
-                    if file_path is None:
-                        state.warnings.append(
-                            {
-                                "phase": "avatars",
-                                "type": "unsafe_media_path",
-                                "message": (
-                                    f"Avatar path for {author.name} failed the export-root "
-                                    "containment check; skipped."
-                                ),
-                            }
-                        )
-                        failed += 1
-                        continue
-                    if not file_path.exists():
-                        state.warnings.append(
-                            {
-                                "phase": "avatars",
-                                "type": "avatar_file_missing",
-                                "message": (
-                                    f"Avatar file not found for {author.name}: {file_path}"
-                                ),
-                            }
-                        )
-                        failed += 1
-                        continue
-
-                autumn_id = await upload_with_cache(
-                    session,
-                    state.autumn_url,
-                    "avatars",
-                    file_path,
-                    config.token,
-                    state.upload_cache,
-                    config.upload_delay,
-                )
-                state.avatar_cache[author_id] = autumn_id
-                state.autumn_uploads[autumn_id] = author_id
-                # Avatars are always referenced via masquerade
-                state.referenced_autumn_ids.add(autumn_id)
-                uploaded += 1
-
-                # Periodic state save on a 5s wall-clock cadence (mirrors messages.py)
-                # so a hard kill loses at most ~5s of avatar_cache work — not up to 9
-                # entries (the old count-gate never checkpointed a sub-10 tail).
-                now = time.monotonic()
-                if now - _last_save_time >= 5.0:
-                    save_state(state, config.output_dir)
-                    _last_save_time = now
-
-            except Exception as exc:  # noqa: BLE001
-                state.warnings.append(
-                    {
-                        "phase": "avatars",
-                        "type": "avatar_upload_failed",
-                        "message": f"Failed to upload avatar for {author.name}: {exc}",
-                    }
-                )
-                failed += 1
-
-    summary = f"Uploaded {uploaded} of {total} unique avatars." + (
-        f" {failed} failed (will use default avatar)." if failed else ""
-    )
-    on_event(MigrationEvent(phase="avatars", status="completed", message=summary))

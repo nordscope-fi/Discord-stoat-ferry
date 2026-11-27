@@ -182,7 +182,6 @@ async def main() -> int:
     results: list[dict[str, object]] = []
     with (
         patch("discord_ferry.migrator.messages.upload_with_cache", record_upload),
-        patch("discord_ferry.migrator.avatars.upload_with_cache", record_upload),
         patch("discord_ferry.migrator.messages.api_send_message", fake_send),
     ):
         for name in ("attachment", "sticker", "embed", "masquerade"):
@@ -195,10 +194,13 @@ async def main() -> int:
         for r in results
         if r["escaped"]
     ]
+    # Author pictures are no longer uploaded (#1208), so the masquerade and avatar-phase
+    # cases have no in-folder upload to count. Their escape check above still applies:
+    # an escape that reached the upload boundary would show up in `escapes`.
     controls = [
         {"case": r["case"], "variant": r["variant"], "inside": len(r["inside"])}
         for r in results
-        if r["variant"] == "control"
+        if r["variant"] == "control" and r["case"] not in ("masquerade", "avatar-phase")
     ]
     summary = {
         "issue": 955,
