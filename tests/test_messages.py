@@ -1052,106 +1052,77 @@ async def test_interaction_context_is_not_duplicated_after_failed_retry(tmp_path
 # _build_masquerade
 # ---------------------------------------------------------------------------
 
+_LINK = "https://cdn.discordapp.com/avatars/auth1/4551a51a7078abcdef0123456789abcd.png"
 
-async def test_build_masquerade_uses_nickname_over_name(tmp_path: Path) -> None:
+
+def test_build_masquerade_uses_nickname_over_name() -> None:
     """Masquerade name uses nickname when set."""
-    state = _make_state()
-    config = _make_config(tmp_path)
-    author = _make_author(name="Alice", nickname="Ally")
-    async with aiohttp.ClientSession() as session:
-        result, _escaped = await _build_masquerade(author, session, state, config)
+    result = _build_masquerade(_make_author(name="Alice", nickname="Ally"), _make_state())
     assert result["name"] == "Ally"
 
 
-async def test_build_masquerade_falls_back_to_name(tmp_path: Path) -> None:
-    """Masquerade name uses author.name when nickname is empty."""
-    state = _make_state()
-    config = _make_config(tmp_path)
-    author = _make_author(name="Bob", nickname="")
-    async with aiohttp.ClientSession() as session:
-        result, _escaped = await _build_masquerade(author, session, state, config)
-    assert result["name"] == "Bob"
+def test_build_masquerade_falls_back_to_name() -> None:
+    """Masquerade name falls back to author.name when nickname is empty."""
+    result = _build_masquerade(_make_author(name="Alice", nickname=""), _make_state())
+    assert result["name"] == "Alice"
 
 
-async def test_build_masquerade_colour_passthrough(tmp_path: Path) -> None:
-    """Author colour is passed to masquerade as-is (British spelling in key)."""
-    state = _make_state()
-    config = _make_config(tmp_path)
-    author = _make_author(color="#ff0000")
-    async with aiohttp.ClientSession() as session:
-        result, _escaped = await _build_masquerade(author, session, state, config)
-    assert result["colour"] == "#ff0000"
+def test_build_masquerade_colour_passthrough() -> None:
+    """Author colour is passed through as the masquerade colour."""
+    result = _build_masquerade(_make_author(color="#FF5733"), _make_state())
+    assert result["colour"] == "#FF5733"
 
 
-async def test_build_masquerade_no_colour_omitted(tmp_path: Path) -> None:
+def test_build_masquerade_no_colour_omitted() -> None:
     """When author has no colour, masquerade omits the colour key."""
-    state = _make_state()
-    config = _make_config(tmp_path)
-    author = _make_author(color=None)
-    async with aiohttp.ClientSession() as session:
-        result, _escaped = await _build_masquerade(author, session, state, config)
+    result = _build_masquerade(_make_author(color=None), _make_state())
     assert "colour" not in result
 
 
-async def test_build_masquerade_avatar_cache_hit(tmp_path: Path) -> None:
-    """When avatar is in cache, Autumn URL is constructed without an upload."""
-    state = _make_state(avatar_cache={"auth1": "cached_file_id"})
-    config = _make_config(tmp_path)
-    author = _make_author(id="auth1")
-    async with aiohttp.ClientSession() as session:
-        result, _escaped = await _build_masquerade(author, session, state, config)
-    assert result["avatar"] == f"{AUTUMN_URL}/avatars/cached_file_id"
-
-
-async def test_build_masquerade_avatar_upload_and_cache(
-    tmp_path: Path, mock_aiohttp: aioresponses
-) -> None:
-    """Local avatar file is uploaded to Autumn and stored in avatar_cache."""
-    avatar_file = tmp_path / "avatar.png"
-    avatar_file.write_bytes(_VALID_PNG)
-
-    mock_aiohttp.post(f"{AUTUMN_URL}/avatars", payload={"id": "new_avatar_id"})
-
-    state = _make_state(avatar_cache={}, upload_cache={})
-    config = _make_config(tmp_path)
-    author = _make_author(id="auth1", avatar_url="avatar.png")
-
-    async with aiohttp.ClientSession() as session:
-        result, _escaped = await _build_masquerade(author, session, state, config)
-
-    assert result["avatar"] == f"{AUTUMN_URL}/avatars/new_avatar_id"
-    assert state.avatar_cache["auth1"] == "new_avatar_id"
-
-
-async def test_build_masquerade_missing_avatar_graceful(tmp_path: Path) -> None:
-    """Missing local avatar file does not raise — avatar key is omitted."""
-    state = _make_state()
-    config = _make_config(tmp_path)
-    author = _make_author(id="auth1", avatar_url="nonexistent_avatar.png")
-    async with aiohttp.ClientSession() as session:
-        result, _escaped = await _build_masquerade(author, session, state, config)
-    assert "avatar" not in result
-
-
-async def test_build_masquerade_truncates_long_name(tmp_path: Path) -> None:
+def test_build_masquerade_truncates_long_name() -> None:
     """Masquerade name is truncated to 32 characters."""
-    state = _make_state()
-    config = _make_config(tmp_path)
-    long_name = "a" * 50
-    author = _make_author(id="auth1", name=long_name)
-    async with aiohttp.ClientSession() as session:
-        result, _escaped = await _build_masquerade(author, session, state, config)
+    result = _build_masquerade(_make_author(id="auth1", name="a" * 50), _make_state())
     assert len(result["name"]) == 32
 
 
-async def test_build_masquerade_http_avatar_skipped(tmp_path: Path) -> None:
-    """Remote avatar URLs are not uploaded — avatar key is omitted."""
+def test_build_masquerade_uses_the_saved_link_and_never_the_autumn_host() -> None:
+    """SC-1.1: the saved link is the avatar, and neither it nor B's result names Autumn."""
+    state = _make_state(author_avatar_links={"auth1": _LINK})
+    with_link = _build_masquerade(_make_author(id="auth1"), state)
+    without_link = _build_masquerade(_make_author(id="auth2"), state)
+    assert with_link["avatar"] == _LINK
+    assert "avatar" not in without_link
+    assert AUTUMN_URL not in str(with_link) + str(without_link)
+    assert "/avatars/" not in (without_link.get("avatar") or "")
+
+
+def test_build_masquerade_ignores_the_authors_own_avatar_url() -> None:
+    """The export's avatarUrl is the avatars phase's input. Messages never act on it."""
     state = _make_state()
-    config = _make_config(tmp_path)
-    author = _make_author(avatar_url="https://cdn.discord.com/avatars/user1/abc.png")
-    async with aiohttp.ClientSession() as session:
-        result, _escaped = await _build_masquerade(author, session, state, config)
+    for avatar_url in (
+        "https://cdn.discord.com/avatars/user1/abc.png",
+        "https://cdn.discordapp.com/avatars/1/abc.png",
+        "avatar.png",
+        "../x-marker.png",
+    ):
+        result = _build_masquerade(_make_author(avatar_url=avatar_url), state)
+        assert "avatar" not in result
+
+
+def test_build_masquerade_never_uses_an_autumn_id_from_an_old_state_file(tmp_path: Path) -> None:
+    """SC-5.1: a state.json written by the release before this one holds avatar_cache."""
+    import json
+
+    from discord_ferry.state import load_state
+
+    (tmp_path / "state.json").write_text(
+        json.dumps({"autumn_url": AUTUMN_URL, "avatar_cache": {"auth1": "autumn-id-1"}}),
+        encoding="utf-8",
+    )
+    state = load_state(tmp_path)
+    result = _build_masquerade(_make_author(id="auth1"), state)
     assert "avatar" not in result
+    assert "autumn-id-1" not in str(result)
 
 
 # ---------------------------------------------------------------------------
@@ -5729,7 +5700,8 @@ async def test_embed_mixed_escape_uploads_in_root_and_warns_once(tmp_path: Path)
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
-async def test_masquerade_escape_sends_without_avatar_and_warns(tmp_path: Path) -> None:
+async def test_a_local_avatar_path_is_not_read_uploaded_or_warned_about(tmp_path: Path) -> None:
+    """SC-1.4: the old unsafe_media_path case for a masquerade picture no longer exists."""
     marker = _outside_marker(tmp_path)
     msg = _make_message(id="m-esc-masq", author=_make_author(avatar_url=f"../{marker.name}"))
     export = _make_export(messages=[msg])
@@ -5747,33 +5719,46 @@ async def test_masquerade_escape_sends_without_avatar_and_warns(tmp_path: Path) 
     masquerade = sent[0].get("masquerade") or {}
     assert masquerade.get("avatar") is None
     assert masquerade.get("name")
-    assert len([w for w in state.warnings if w.get("type") == "unsafe_media_path"]) == 1
+    assert [w for w in state.warnings if w.get("type") == "unsafe_media_path"] == []
+    assert marker.read_bytes() == b"MARKER"
 
 
-async def test_build_masquerade_local_avatar_escape_returns_flag(tmp_path: Path) -> None:
-    _outside_marker(tmp_path)
-    author = _make_author(avatar_url="../x-marker.png")
-    config = _make_config(tmp_path)
+@pytest.mark.usefixtures("publication_permission_collaborator")
+async def test_avatars_then_messages_sends_each_authors_saved_link(tmp_path: Path) -> None:
+    """SC-I1: the real avatars phase fills the maps, and the real messages phase sends them."""
+    from discord_ferry.migrator.avatars import run_avatars
+
+    hash_a, hash_b = "a" * 32, "b" * 32
+    alice = _make_author(id="111", name="Alice")
+    bob = _make_author(id="222", name="Bob")
+    export = _make_export(
+        messages=[
+            _make_message(id="m1", author=alice),
+            _make_message(id="m2", author=bob),
+            _make_message(id="m3", author=alice),
+        ]
+    )
+    config = _make_config(tmp_path, discord_token="Bot e2e-token")
     state = _make_state()
+    sent: list[dict[str, Any]] = []
     uploads: list[tuple[str, Path]] = []
-    with patch("discord_ferry.migrator.messages.upload_with_cache", _recording_uploads(uploads)):
-        result, escaped = await _build_masquerade(author, None, state, config)
-    assert escaped is True
-    assert result.get("avatar") is None
+    with aioresponses() as mock:
+        mock.get("https://discord.com/api/v10/users/111", payload={"id": "111", "avatar": hash_a})
+        mock.get("https://discord.com/api/v10/users/222", payload={"id": "222", "avatar": hash_b})
+        await run_avatars(config, state, [export], lambda e: None)
+        with (
+            patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)),
+            patch("discord_ferry.migrator.messages.upload_with_cache", _recording_uploads(uploads)),
+        ):
+            await run_messages(config, state, [export], lambda e: None)
+        discord_requests = [(m, str(u)) for (m, u) in mock.requests if u.host == "discord.com"]
+
+    assert len(discord_requests) == 2  # the messages phase asked Discord nothing
     assert uploads == []
-
-
-async def test_build_masquerade_local_avatar_in_root_not_escaped(tmp_path: Path) -> None:
-    (tmp_path / "av.png").write_bytes(b"x")
-    author = _make_author(avatar_url="av.png")
-    config = _make_config(tmp_path)
-    state = _make_state()
-    uploads: list[tuple[str, Path]] = []
-    with patch("discord_ferry.migrator.messages.upload_with_cache", _recording_uploads(uploads)):
-        result, escaped = await _build_masquerade(author, None, state, config)
-    assert escaped is False
-    assert result.get("avatar")
-    assert len(uploads) == 1
+    avatars = [(item.get("masquerade") or {}).get("avatar") for item in sent]
+    link_a = f"https://cdn.discordapp.com/avatars/111/{hash_a}.png"
+    link_b = f"https://cdn.discordapp.com/avatars/222/{hash_b}.png"
+    assert avatars == [link_a, link_b, link_a]
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")

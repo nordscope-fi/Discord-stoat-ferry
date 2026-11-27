@@ -1359,3 +1359,50 @@ async def test_flatten_resolves_the_post_bump_collision_to_the_parent(
         f"{state.message_map[_ORIGIN]!r}. A reply in the parent channel would then be "
         f"sent against the thread's message, and a sent reply cannot be unsent"
     )
+
+
+# ---------------------------------------------------------------------------
+# One lookup per author, shared by every concurrent channel (#1208)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("publication_permission_collaborator")
+async def test_concurrent_channels_share_one_lookup_per_author(tmp_path: Path) -> None:
+    """SC-I2: three channels start with the same author, and Discord is asked once."""
+    from discord_ferry.migrator.avatars import run_avatars
+
+    picture_hash = "c" * 32
+    author = _make_author(id="4242", name="Alice")
+    channel_map = {f"ch{i}": _valid_id(f"stoat_ch{i}") for i in range(3)}
+    exports = [
+        _make_export(
+            channel_id=f"ch{i}",
+            name=f"channel-{i}",
+            messages=[_make_message(id=f"msg_ch{i}", author=author)],
+        )
+        for i in range(3)
+    ]
+    state = _make_state(channel_map=channel_map)
+    config = _make_config(tmp_path, max_concurrent_channels=3, discord_token="Bot parallel-token")
+    masquerades: list[dict[str, Any]] = []
+
+    async def record_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        masquerades.append(kwargs["masquerade"])
+        await asyncio.sleep(0)
+        return {"_id": _valid_id(f"stoat_msg_{channel_id}")}
+
+    with aioresponses() as mock:
+        mock.get(
+            "https://discord.com/api/v10/users/4242",
+            payload={"id": "4242", "avatar": picture_hash},
+        )
+        await run_avatars(config, state, exports, lambda e: None)
+        with patch("discord_ferry.migrator.messages.api_send_message", record_send):
+            await run_messages(config, state, exports, lambda e: None)
+        discord_requests = [url for (_method, url) in mock.requests if url.host == "discord.com"]
+
+    link = f"https://cdn.discordapp.com/avatars/4242/{picture_hash}.png"
+    assert len(discord_requests) == 1
+    assert [m.get("avatar") for m in masquerades] == [link, link, link]

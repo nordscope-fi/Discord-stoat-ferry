@@ -2466,8 +2466,10 @@ async def test_a_thread_with_no_resolvable_parent_is_skipped_before_the_suppress
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
-async def test_merge_route_masquerade_escape_warns_to_state(tmp_path: Path) -> None:
-    """Chunk 3 (#1024): the merged-thread masquerade route warns on escaped avatars."""
+async def test_merge_route_does_not_read_or_warn_about_an_author_picture_path(
+    tmp_path: Path,
+) -> None:
+    """#1208: the merged-thread route no longer touches an author's local picture path."""
     marker = tmp_path.parent / (tmp_path.name + "-marker.png")
     marker.write_bytes(b"MARKER")
     config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0)
@@ -2504,4 +2506,5 @@ async def test_merge_route_masquerade_escape_warns_to_state(tmp_path: Path) -> N
     merged = [k for k in sent if "thread msg" in str(k.get("content") or "")]
     assert merged, sent
     assert (merged[0].get("masquerade") or {}).get("avatar") is None
-    assert [w for w in state.warnings if w.get("type") == "unsafe_media_path"]
+    assert [w for w in state.warnings if w.get("type") == "unsafe_media_path"] == []
+    assert marker.read_bytes() == b"MARKER"
