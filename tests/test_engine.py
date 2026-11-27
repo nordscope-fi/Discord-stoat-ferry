@@ -3732,6 +3732,55 @@ async def test_an_interrupted_avatars_phase_resumes_to_the_same_maps_as_a_clean_
     assert len(resumed.author_avatar_links) == 5
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_skip_avatars_makes_no_lookup_and_sets_no_picture(tmp_path: Path) -> None:
+    """SC-1.3: skip_avatars means no pictures at all, so Discord is never asked."""
+    avatars = AsyncMock()
+    config = _make_config(tmp_path, skip_avatars=True, discord_token="Bot skip-token")
+    events: list[MigrationEvent] = []
+
+    with aioresponses() as mock:
+        _mock_picture_lookups(mock, "1")
+        state = await run_migration(
+            config, events.append, phase_overrides={**_NOOP_OVERRIDES, "avatars": avatars}
+        )
+        assert _looked_up(mock) == []
+
+    avatars.assert_not_awaited()
+    assert any(e.phase == "avatars" and e.status == "skipped" for e in events)
+    assert state.author_avatar_links == {}
+    assert state.author_avatar_reasons == {}
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_a_dry_run_looks_up_pictures_and_writes_nothing_to_stoat(tmp_path: Path) -> None:
+    """SC-2.14: the dry run keeps the links for the report and sends no message."""
+    messages = engine_module._DEFAULT_PHASES["messages"]
+    config = _make_config(tmp_path, dry_run=True, discord_token="Bot dry-token")
+    overrides = {
+        **_NOOP_OVERRIDES,
+        "avatars": _real_avatars_phase(_export_by("11")),
+        "messages": messages,
+    }
+
+    with aioresponses() as mock:
+        _mock_picture_lookups(mock, "11")
+        state = await run_migration(config, lambda e: None, phase_overrides=overrides)
+        looked_up = _looked_up(mock)
+        writes = [
+            (method, str(url))
+            for (method, url) in mock.requests
+            if url.host != "discord.com" and method != "GET"
+        ]
+
+    assert looked_up == ["11"]
+    assert writes == []
+    assert state.is_dry_run is True
+    assert state.author_avatar_links == {
+        "11": f"https://cdn.discordapp.com/avatars/11/{_PICTURE_HASH}.png"
+    }
+
+
 def test_phase_order_contains_expected_phases() -> None:
     """Verify all expected phases are present in PHASE_ORDER."""
     expected = {

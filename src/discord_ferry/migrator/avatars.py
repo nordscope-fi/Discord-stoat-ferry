@@ -15,7 +15,12 @@ from discord_ferry.core.http import new_session, remote_media_refusal
 from discord_ferry.discord.client import fetch_user
 from discord_ferry.errors import DiscordAuthError, DiscordForbiddenError, MigrationError
 from discord_ferry.parser.dce_parser import stream_messages
-from discord_ferry.state import save_state
+from discord_ferry.state import (
+    AVATAR_REASON_CODES,
+    AVATAR_REASON_LABELS,
+    author_picture_counts,
+    save_state,
+)
 
 if TYPE_CHECKING:
     import aiohttp
@@ -56,6 +61,34 @@ _TOKEN_REASONS = frozenset({"no_discord_token", "token_rejected", "lookup_not_al
 
 #: Wall-clock gap between mid-phase state saves, so a hard kill loses a few seconds of lookups.
 _SAVE_INTERVAL_SECONDS = 5.0
+
+#: What the report says about each reason. ``{count}`` is the number of authors. Fixed text
+#: only: nothing from Discord, the export or an exception is ever added to it.
+_WARNING_TEXT: dict[str, str] = {
+    "no_picture": "{count} author(s) have no Discord picture, so their messages show no picture.",
+    "no_discord_token": (
+        "Author pictures need a Discord token. {count} author(s) will show no picture on their "
+        "messages."
+    ),
+    "lookup_failed": (
+        "Discord did not give a picture for {count} author(s), so their messages show no picture."
+    ),
+    "token_rejected": (
+        "Discord rejected the Discord token during picture lookups, so {count} author(s) show "
+        "no picture."
+    ),
+    "lookup_not_allowed": (
+        "This Discord token cannot look up other users, so {count} author(s) show no picture."
+    ),
+    "export_link_unusable": (
+        "{count} author picture link(s) in the export are not on Discord's picture servers and "
+        "were ignored."
+    ),
+    "link_too_long": (
+        "{count} author picture link(s) are longer than Stoat allows (256 characters) and were "
+        "skipped."
+    ),
+}
 
 
 def classify_export_link(url: str) -> tuple[ExportLinkKind, str]:
@@ -215,6 +248,54 @@ async def _resolve_author(
         _record_reason(state, author.id, reason)
 
 
+def _summary(counts: dict[str, int]) -> str:
+    """One line for the progress log: how many authors got a picture, and why the rest did not."""
+    if counts["total"] == 0:
+        return "No authors found, so there are no pictures to set."
+    text = f"Pictures set for {counts['with_picture']} of {counts['total']} authors"
+    parts = [
+        f"{AVATAR_REASON_LABELS[code]}: {counts[code]}"
+        for code in AVATAR_REASON_CODES
+        if code in counts
+    ]
+    return f"{text} ({', '.join(parts)})." if parts else f"{text}."
+
+
+def _publish_outcome(state: MigrationState, on_event: EventCallback) -> None:
+    """Write one warning per reason, tell the user about a missing token, then summarise."""
+    counts = author_picture_counts(state)
+    # A resumed run counts both runs' authors, so it replaces the earlier warnings.
+    state.warnings[:] = [w for w in state.warnings if w.get("type") != "author_pictures"]
+    for code in AVATAR_REASON_CODES:
+        count = counts.get(code, 0)
+        if count:
+            state.warnings.append(
+                {
+                    "phase": "avatars",
+                    "type": "author_pictures",
+                    "message": _WARNING_TEXT[code].format(count=count),
+                    "count": str(count),
+                }
+            )
+    missing_token = counts.get("no_discord_token", 0)
+    if missing_token:
+        on_event(
+            MigrationEvent(
+                phase="avatars",
+                status="notice",
+                message=_WARNING_TEXT["no_discord_token"].format(count=missing_token),
+            )
+        )
+    on_event(
+        MigrationEvent(
+            phase="avatars",
+            status="completed",
+            message=_summary(counts),
+            detail={"author_pictures": dict(counts)},
+        )
+    )
+
+
 async def run_avatars(
     config: FerryConfig,
     state: MigrationState,
@@ -245,16 +326,19 @@ async def run_avatars(
     lookups = _Lookups()
     last_save = time.monotonic()
     async with new_session() as session:
-        for author in pending:
+        for index, author in enumerate(pending, start=1):
+            on_event(
+                MigrationEvent(
+                    phase="avatars",
+                    status="progress",
+                    message=f"Looking up picture {index} of {len(pending)}",
+                    current=index,
+                    total=len(pending),
+                )
+            )
             await _resolve_author(config, state, session, author, lookups)
             now = time.monotonic()
             if now - last_save >= _SAVE_INTERVAL_SECONDS:
                 save_state(state, config.output_dir)
                 last_save = now
-    on_event(
-        MigrationEvent(
-            phase="avatars",
-            status="completed",
-            message=f"Resolved pictures for {len(authors)} authors.",
-        )
-    )
+    _publish_outcome(state, on_event)
