@@ -1569,6 +1569,8 @@ _KNOWN_STATE_FIELDS = frozenset(
         # and a fixed reason code. Neither holds free text (#1208).
         "author_avatar_links",
         "author_avatar_reasons",
+        # Structural: one of ten fixed codes, and a hand-edited value loads as "" (#1249).
+        "join_notice_outcome",
         "upload_cache",
         "author_names",
         "pending_pins",
@@ -2247,3 +2249,66 @@ def test_permission_runtime_is_not_state_equality_or_repr() -> None:
     first.permission_runtime = PermissionRuntime()
     assert first == second
     assert "permission_runtime" not in repr(first)
+
+
+# ---------------------------------------------------------------------------
+# The join-notice outcome (#1249)
+# ---------------------------------------------------------------------------
+
+_JOIN_NOTICE_CODES = {
+    "set",
+    "kept_existing",
+    "would_set",
+    "none_on_discord",
+    "suppressed_on_discord",
+    "channel_not_migrated",
+    "no_discord_token",
+    "no_discord_metadata",
+    "not_recorded",
+    "edit_failed",
+}
+
+
+def test_join_notice_outcome_round_trips(tmp_path: Path) -> None:
+    """SC-3.6: the outcome survives save then load."""
+    save_state(MigrationState(join_notice_outcome="kept_existing"), tmp_path)
+    assert load_state(tmp_path).join_notice_outcome == "kept_existing"
+
+
+def test_join_notice_outcome_defaults_empty_for_an_older_state_file(tmp_path: Path) -> None:
+    """SC-3.6: a state file written before the field existed loads it as not decided."""
+    save_state(MigrationState(), tmp_path)
+    raw = json.loads((tmp_path / "state.json").read_text())
+    del raw["join_notice_outcome"]
+    (tmp_path / "state.json").write_text(json.dumps(raw))
+    assert load_state(tmp_path).join_notice_outcome == ""
+
+
+@pytest.mark.parametrize("bad", ["boom hunter2horse", 5, ["set"], None])
+def test_a_hand_edited_join_notice_outcome_loads_as_not_decided(
+    tmp_path: Path, bad: object
+) -> None:
+    """A value that is not one of the ten codes never reaches the report as text."""
+    save_state(MigrationState(), tmp_path)
+    raw = json.loads((tmp_path / "state.json").read_text())
+    raw["join_notice_outcome"] = bad
+    (tmp_path / "state.json").write_text(json.dumps(raw))
+    assert load_state(tmp_path).join_notice_outcome == ""
+
+
+def test_every_join_notice_code_has_fixed_wording() -> None:
+    """SC-4.5: the ten codes, the type and the wording table cannot drift apart.
+
+    Killing: a code added to JoinNoticeCode (or to the wording table) without the other, and
+    wording that is empty, repeated or carries an em dash.
+    """
+    from typing import get_args
+
+    from discord_ferry.state import JOIN_NOTICE_WORDING, JoinNoticeCode
+
+    assert set(get_args(JoinNoticeCode)) == _JOIN_NOTICE_CODES
+    assert set(JOIN_NOTICE_WORDING) == _JOIN_NOTICE_CODES
+    sentences = list(JOIN_NOTICE_WORDING.values())
+    assert all(s and s.endswith(".") for s in sentences)
+    assert len(set(sentences)) == len(sentences)
+    assert not any(chr(0x2014) in s for s in sentences)
