@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Run the test suite in parallel by default, which cuts a full local run from about 18 minutes to a few; pass `-n 0` for a serial run (#1454).
+- Six tests that sat through real Stoat slowmode, retry and circuit-breaker pauses now record each wait instead, and still check the delay the code asked for (#1454).
+- A new test catches a repair that forgets to clear a recreated channel's stale high-water mark; the existing test could not, because a successful resend rewrites it (#1454).
 - Document that servers Ferry created before 3.6.5 keep Stoat's empty automatic "General" channel, which Ferry cannot tell from a user's own channel, and how to remove it by hand (#1642).
 - Allow snapshot evidence for the feedback-service defaults decision record only, with primary-checkout ownership, separate instruction bytes, and exact scoped backup checks (#1179).
 - Align the Context7 launcher pin and integrity comment with the updated 4.4.4 package lock (#1455).

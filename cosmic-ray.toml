@@ -38,7 +38,7 @@ timeout = 30.0
 # -v is required, not cosmetic: the captured per-mutant output is where the test
 # NAMES come from, and a count without names hides a mutant that killed fewer or
 # different tests than expected, which is itself the finding.
-test-command = "uv run --extra mutation pytest tests/test_security.py tests/test_state.py tests/test_atomicio.py -v"
+test-command = "uv run --extra mutation pytest -n 0 tests/test_security.py tests/test_state.py tests/test_atomicio.py -v"
 
 [cosmic-ray.distributor]
 name = "local"

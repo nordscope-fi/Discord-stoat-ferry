@@ -113,3 +113,6 @@ warn_unused_configs = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Run across all cores by default (#1454): the full suite drops from about 18 minutes to
+# about 4, and CI already runs it in parallel. Use `-n 0` for a serial run (debugger, -x).
+addopts = "-n auto --dist=load"
