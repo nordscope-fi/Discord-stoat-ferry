@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Document that servers Ferry created before 3.6.5 keep Stoat's empty automatic "General" channel, which Ferry cannot tell from a user's own channel, and how to remove it by hand (#1642).
 - Allow snapshot evidence for the feedback-service defaults decision record only, with primary-checkout ownership, separate instruction bytes, and exact scoped backup checks (#1179).
 - Align the Context7 launcher pin and integrity comment with the updated 4.4.4 package lock (#1455).
 - Match the feedback container check to the uv 0.13.4 pin and its 19 distribution hashes (#1456).
