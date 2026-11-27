@@ -6802,7 +6802,10 @@ def _register_forum_index_channels(m: aioresponses, index_send_status: int) -> N
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_forum_index_slowmode_wait_reports_channel_context(
-    channel_attributes_only, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    channel_attributes_only,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recorded_sleeps: list[float],
 ) -> None:
     """The initial forum index gives its typed cooldown the channels context."""
     from discord_ferry.migrator.delivery import DeliveryResult
@@ -6839,6 +6842,7 @@ async def test_forum_index_slowmode_wait_reports_channel_context(
             {"kind": "slowmode_wait", "retry_after_seconds": 29},
         )
     ]
+    assert 29 in recorded_sleeps
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
