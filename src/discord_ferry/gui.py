@@ -1040,7 +1040,7 @@ def setup_page() -> None:
                         precision=0,
                     ).classes("w-48")
                     skip_avatars_cb = ui.checkbox(
-                        "Skip avatar pre-flight (avatars upload on demand)",
+                        "Skip author pictures (migrated messages show no picture)",
                         value=adv_stored["skip_avatars"],
                     )
 
