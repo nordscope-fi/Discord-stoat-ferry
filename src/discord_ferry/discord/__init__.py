@@ -17,6 +17,8 @@ from discord_ferry.discord.metadata import (
     _bad_id,
     capture_guild_emojis,
     capture_permission_source,
+    capture_system_channel_flags,
+    capture_system_channel_id,
     load_bound_discord_metadata,
     load_discord_metadata,
     load_discord_metadata_for_resume,
@@ -152,6 +154,8 @@ async def fetch_and_translate_guild_metadata(
         guild_nsfw=guild_nsfw,
         permission_source=permission_source,
         guild_emojis=capture_guild_emojis(guild_data.get("emojis")),
+        system_channel_id=capture_system_channel_id(guild_data.get("system_channel_id")),
+        system_channel_flags=capture_system_channel_flags(guild_data.get("system_channel_flags")),
     )
 
 
