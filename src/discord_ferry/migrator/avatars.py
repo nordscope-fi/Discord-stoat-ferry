@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -14,6 +15,7 @@ from discord_ferry.core.http import new_session, remote_media_refusal
 from discord_ferry.discord.client import fetch_user
 from discord_ferry.errors import DiscordAuthError, DiscordForbiddenError, MigrationError
 from discord_ferry.parser.dce_parser import stream_messages
+from discord_ferry.state import save_state
 
 if TYPE_CHECKING:
     import aiohttp
@@ -47,6 +49,13 @@ _PICTURE_PATH = re.compile(
 )
 
 ExportLinkKind = Literal["link", "unusable", "skip"]
+
+#: Reasons that depend on the token, so a resumed run asks again. Every other reason is a
+#: property of the author or the export and comes out the same on a second attempt.
+_TOKEN_REASONS = frozenset({"no_discord_token", "token_rejected", "lookup_not_allowed"})
+
+#: Wall-clock gap between mid-phase state saves, so a hard kill loses a few seconds of lookups.
+_SAVE_INTERVAL_SECONDS = 5.0
 
 
 def classify_export_link(url: str) -> tuple[ExportLinkKind, str]:
@@ -119,6 +128,14 @@ class _Lookups:
 
     stopped_reason: str | None = None
     succeeded: int = 0
+
+
+def _is_settled(state: MigrationState, author_id: str) -> bool:
+    """True when this author needs no further work on a resumed run."""
+    if author_id in state.author_avatar_links:
+        return True
+    reason = state.author_avatar_reasons.get(author_id)
+    return reason is not None and reason not in _TOKEN_REASONS
 
 
 def _record_link(state: MigrationState, author_id: str, link: str) -> None:
@@ -211,6 +228,9 @@ async def run_avatars(
     Nothing is uploaded to Autumn, no local file is read, and nothing is sent to Stoat. A dry
     run does the same lookups, as the Discord metadata fetch does.
 
+    A resumed run skips authors that are already settled: those with a link, ``no_picture``
+    or ``lookup_failed``. It asks again for the reasons that depend on the token.
+
     Args:
         config: Ferry configuration (``discord_token`` enables lookups).
         state: Migration state; the two author picture maps are filled in.
@@ -221,10 +241,16 @@ async def run_avatars(
         MigrationEvent(phase="avatars", status="started", message="Scanning exports for authors")
     )
     authors = sorted(_collect_unique_authors(exports).items(), key=lambda item: item[0])
+    pending = [author for author_id, author in authors if not _is_settled(state, author_id)]
     lookups = _Lookups()
+    last_save = time.monotonic()
     async with new_session() as session:
-        for _author_id, author in authors:
+        for author in pending:
             await _resolve_author(config, state, session, author, lookups)
+            now = time.monotonic()
+            if now - last_save >= _SAVE_INTERVAL_SECONDS:
+                save_state(state, config.output_dir)
+                last_save = now
     on_event(
         MigrationEvent(
             phase="avatars",

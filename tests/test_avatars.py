@@ -588,3 +588,132 @@ async def test_an_export_with_no_messages_completes(tmp_path: Path) -> None:
     assert events[-1].status == "completed"
     assert state.author_avatar_links == {}
     assert state.author_avatar_reasons == {}
+
+
+# ---------------------------------------------------------------------------
+# Resume inside the phase (S5)
+# ---------------------------------------------------------------------------
+
+
+def _resume_state() -> MigrationState:
+    """Seven authors, as the interrupted run left them, with the token problems unsettled."""
+    state = _make_state()
+    state.current_phase = "avatars"
+    state.author_avatar_links = {
+        "1": f"{_CDN}/avatars/1/{_HASH}.png",
+        "2": f"{_CDN}/avatars/2/{_HASH}.png",
+    }
+    state.author_avatar_reasons = {
+        "3": "no_picture",
+        "4": "lookup_failed",
+        "5": "token_rejected",
+        "6": "token_rejected",
+        "7": "no_discord_token",
+    }
+    return state
+
+
+async def test_a_resumed_phase_asks_only_for_the_token_dependent_authors(tmp_path: Path) -> None:
+    """SC-5.2: authors with a link, no_picture or lookup_failed are settled."""
+    authors = [_make_author(str(n)) for n in range(1, 8)]
+    config = _make_config(tmp_path, discord_token=DISCORD_TOKEN, resume=True)
+    state = _resume_state()
+    settled_links = dict(state.author_avatar_links)
+    with aioresponses() as mock:
+        for author_id in ("5", "6", "7"):
+            mock.get(_user_url(author_id), payload={"id": author_id, "avatar": _HASH})
+        await run_avatars(config, state, [_export_of(*authors)], lambda e: None)
+        asked = sorted(url.path.rsplit("/", 1)[1] for (_method, url) in mock.requests)
+    assert asked == ["5", "6", "7"]
+    assert {k: state.author_avatar_links[k] for k in ("1", "2")} == settled_links
+    assert set(state.author_avatar_links) == {"1", "2", "5", "6", "7"}
+    assert state.author_avatar_reasons == {"3": "no_picture", "4": "lookup_failed"}
+
+
+async def test_every_token_dependent_reason_is_retried(tmp_path: Path) -> None:
+    authors = [_make_author(str(n)) for n in (11, 12, 13)]
+    config = _make_config(tmp_path, discord_token=DISCORD_TOKEN, resume=True)
+    state = _make_state()
+    state.author_avatar_reasons = {
+        "11": "no_discord_token",
+        "12": "token_rejected",
+        "13": "lookup_not_allowed",
+    }
+    with aioresponses() as mock:
+        for author_id in ("11", "12", "13"):
+            mock.get(_user_url(author_id), payload={"id": author_id, "avatar": _HASH})
+        await run_avatars(config, state, [_export_of(*authors)], lambda e: None)
+        assert _request_count(mock) == 3
+    assert state.author_avatar_reasons == {}
+    assert set(state.author_avatar_links) == {"11", "12", "13"}
+
+
+async def test_reasons_that_do_not_depend_on_the_token_are_settled(tmp_path: Path) -> None:
+    """An unusable export link or a long link comes out the same on every attempt."""
+    authors = [_make_author("21"), _make_author("22")]
+    config = _make_config(tmp_path, discord_token=DISCORD_TOKEN, resume=True)
+    state = _make_state()
+    state.author_avatar_reasons = {"21": "export_link_unusable", "22": "link_too_long"}
+    with aioresponses() as mock:
+        await run_avatars(config, state, [_export_of(*authors)], lambda e: None)
+        assert _request_count(mock) == 0
+    assert state.author_avatar_reasons == {"21": "export_link_unusable", "22": "link_too_long"}
+
+
+async def test_a_retry_without_a_token_keeps_the_reason(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, resume=True)
+    state = _make_state()
+    state.author_avatar_reasons = {"31": "token_rejected"}
+    await run_avatars(config, state, [_export_of(_make_author("31"))], lambda e: None)
+    assert state.author_avatar_reasons == {"31": "no_discord_token"}
+    assert state.author_avatar_links == {}
+
+
+def _three_author_export() -> DCEExport:
+    return _export_of(*(_make_author(f"90{i}") for i in range(3)))
+
+
+async def test_the_phase_saves_state_once_the_clock_passes_five_seconds(tmp_path: Path) -> None:
+    """SC-5.4: a short run checkpoints mid-loop, with the links settled so far."""
+    import itertools
+    from unittest.mock import Mock, patch
+
+    snapshots: list[dict[str, str]] = []
+    save_mock = Mock(
+        side_effect=lambda state, _dir: snapshots.append(dict(state.author_avatar_links))
+    )
+    # Every clock reading jumps 100 s, so each check crosses the 5 s threshold even if other
+    # code also reads the clock.
+    monotonic = Mock(side_effect=itertools.count(0, 100))
+    config = _make_config(tmp_path, discord_token=DISCORD_TOKEN)
+    state = _make_state()
+    with (
+        aioresponses() as mock,
+        patch("discord_ferry.migrator.avatars.save_state", save_mock),
+        patch("discord_ferry.migrator.avatars.time.monotonic", monotonic),
+    ):
+        for i in range(3):
+            mock.get(_user_url(f"90{i}"), payload={"id": f"90{i}", "avatar": _HASH})
+        await run_avatars(config, state, [_three_author_export()], lambda e: None)
+    assert save_mock.call_count >= 1
+    assert snapshots[0], "the first save must already hold the first author's link"
+    assert save_mock.call_args.args[1] == config.output_dir
+
+
+async def test_the_phase_does_not_save_while_the_clock_stands_still(tmp_path: Path) -> None:
+    """SC-5.4: no write storm on a fast run."""
+    from unittest.mock import Mock, patch
+
+    save_mock = Mock()
+    config = _make_config(tmp_path, discord_token=DISCORD_TOKEN)
+    state = _make_state()
+    with (
+        aioresponses() as mock,
+        patch("discord_ferry.migrator.avatars.save_state", save_mock),
+        patch("discord_ferry.migrator.avatars.time.monotonic", Mock(return_value=1.0)),
+    ):
+        for i in range(3):
+            mock.get(_user_url(f"90{i}"), payload={"id": f"90{i}", "avatar": _HASH})
+        await run_avatars(config, state, [_three_author_export()], lambda e: None)
+    assert save_mock.call_count == 0
+    assert len(state.author_avatar_links) == 3
