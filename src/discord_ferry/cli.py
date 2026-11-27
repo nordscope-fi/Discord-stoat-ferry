@@ -621,7 +621,7 @@ _common_options = [
         "--skip-avatars",
         is_flag=True,
         default=False,
-        help="Skip the avatar pre-flight phase; avatars still upload on demand during messages",
+        help="Skip author pictures; migrated messages show no picture",
     ),
     click.option(
         "--validate-after",

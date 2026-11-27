@@ -230,6 +230,87 @@ def test_migrate_help(runner: CliRunner) -> None:
     assert "--stoat-url" in result.output
 
 
+def test_skip_avatars_help_says_pictures_are_skipped(runner: CliRunner) -> None:
+    """SC-4.4: the flag no longer promises on-demand uploads."""
+    result = runner.invoke(main, ["migrate", "--help"])
+    text = " ".join(result.output.split())
+    assert "Skip author pictures; migrated messages show no picture" in text
+    assert "on demand" not in text
+    assert "pre-flight" not in text
+
+
+async def _real_picture_events() -> list[Any]:
+    """The events the real avatars phase emits for six authors with mixed outcomes."""
+    from aioresponses import aioresponses
+
+    from discord_ferry.config import FerryConfig
+    from discord_ferry.migrator.avatars import run_avatars
+    from discord_ferry.parser.models import (
+        DCEAuthor,
+        DCEChannel,
+        DCEExport,
+        DCEGuild,
+        DCEMessage,
+    )
+
+    ids = [str(800 + n) for n in range(6)]
+    source = DCEExport(
+        guild=DCEGuild(id="g1", name="Test"),
+        channel=DCEChannel(id="c1", type=0, name="general"),
+        messages=[
+            DCEMessage(
+                id=f"m{n}",
+                type="Default",
+                timestamp="2024-01-01T00:00:00Z",
+                content="hi",
+                author=DCEAuthor(id=n, name=f"Author {n}"),
+            )
+            for n in ids
+        ],
+    )
+    config = FerryConfig(
+        export_dir=Path("."),
+        stoat_url="https://api.test",
+        token="test-token",
+        discord_token="Bot shell-token",
+        output_dir=Path("."),
+    )
+    events: list[Any] = []
+    with aioresponses() as mock:
+        for n in ids[:3]:
+            mock.get(
+                f"https://discord.com/api/v10/users/{n}", payload={"id": n, "avatar": "a" * 32}
+            )
+        for n in ids[3:5]:
+            mock.get(f"https://discord.com/api/v10/users/{n}", payload={"id": n, "avatar": None})
+        mock.get(f"https://discord.com/api/v10/users/{ids[5]}", status=404, payload={"code": 10013})
+        await run_avatars(config, MigrationState(), [source], events.append)
+    return events
+
+
+async def test_cli_shows_the_picture_count_and_each_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SC-4.3 (CLI half): the avatars completion line carries the counts."""
+    import io
+
+    from rich.console import Console
+
+    from discord_ferry import cli
+
+    events = await _real_picture_events()
+    captured = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=captured, force_terminal=False, width=200))
+    tracker = cli._ProgressTracker()
+    for event in events:
+        tracker.on_event(event)
+
+    output = " ".join(captured.getvalue().split())
+    assert "avatars: Pictures set for 3 of 6 authors" in output
+    assert "no Discord picture: 2" in output
+    assert "lookup failed: 1" in output
+
+
 @pytest.mark.parametrize(
     ("command", "env_vars"),
     [

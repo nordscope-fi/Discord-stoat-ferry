@@ -1404,3 +1404,51 @@ async def test_completion_card_deep_links_to_tool_page(
     from discord_ferry import gui
 
     assert user_store["output_dir"] == str(gui._default_gui_output_dir())
+
+
+# ---------------------------------------------------------------------------
+# Author pictures (#1208)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.nicegui_main_file("tests/nicegui_app.py")
+async def test_gui_skip_checkbox_says_pictures_are_skipped(
+    user: User, user_store: dict[str, object], tab_store: dict[str, object]
+) -> None:
+    """SC-4.4: the setup page's skip option no longer promises on-demand uploads."""
+    from nicegui import ui
+
+    await user.open("/")
+    await user.should_see("Advanced Options")
+    labels = [box.text for box in user.find(kind=ui.checkbox).elements]
+    assert "Skip author pictures (migrated messages show no picture)" in labels
+    assert not [label for label in labels if "on demand" in label or "pre-flight" in label]
+
+
+@pytest.mark.nicegui_main_file("tests/nicegui_app.py")
+async def test_gui_log_shows_the_picture_count_and_each_reason(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """SC-4.3 (GUI half): the avatars completion line reaches the run log."""
+    from discord_ferry.core.events import MigrationEvent
+    from tests.test_cli import _real_picture_events
+
+    events = await _real_picture_events()
+    user_store.update(export_dir=str(tmp_path), stoat_url="https://api.test")
+    tab_store["token"] = "synthetic-session-token"
+    monkeypatch.setattr("discord_ferry.gui._default_gui_output_dir", lambda: tmp_path / "ui-output")
+
+    async def replay_events(config, *, on_event):  # type: ignore[no-untyped-def]
+        for event in events:
+            on_event(event)
+        on_event(MigrationEvent(phase="report", status="completed", message="done"))
+
+    monkeypatch.setattr("discord_ferry.gui.run_migration", replay_events)
+    await user.open("/migrate")
+    await user.should_see("Pictures set for 3 of 6 authors")
+    await user.should_see("no Discord picture: 2")
+    await user.should_see("lookup failed: 1")
