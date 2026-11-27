@@ -717,3 +717,199 @@ async def test_the_phase_does_not_save_while_the_clock_stands_still(tmp_path: Pa
         await run_avatars(config, state, [_three_author_export()], lambda e: None)
     assert save_mock.call_count == 0
     assert len(state.author_avatar_links) == 3
+
+
+# ---------------------------------------------------------------------------
+# Reporting: warnings, notice and progress events (S4)
+# ---------------------------------------------------------------------------
+
+
+def _picture_warnings(state: MigrationState) -> list[dict[str, str]]:
+    return [w for w in state.warnings if w.get("type") == "author_pictures"]
+
+
+async def test_the_summary_event_carries_the_count_and_each_reason(tmp_path: Path) -> None:
+    """SC-4.3 (event half): three pictures, two authors with none, one failed lookup."""
+    authors = [_make_author(str(800 + i)) for i in range(6)]
+    config = _make_config(tmp_path, discord_token=DISCORD_TOKEN)
+    state = _make_state()
+    events: list[MigrationEvent] = []
+    with aioresponses() as mock:
+        for author in authors[:3]:
+            mock.get(_user_url(author.id), payload={"id": author.id, "avatar": _HASH})
+        for author in authors[3:5]:
+            mock.get(_user_url(author.id), payload={"id": author.id, "avatar": None})
+        mock.get(_user_url(authors[5].id), status=404, payload={"code": 10013})
+        await run_avatars(config, state, [_export_of(*authors)], events.append)
+
+    completed = events[-1]
+    assert completed.status == "completed"
+    assert completed.message == (
+        "Pictures set for 3 of 6 authors (no Discord picture: 2, lookup failed: 1)."
+    )
+    assert completed.detail == {
+        "author_pictures": {"total": 6, "with_picture": 3, "no_picture": 2, "lookup_failed": 1}
+    }
+
+
+async def test_progress_events_count_the_authors_that_need_work(tmp_path: Path) -> None:
+    authors = [_make_author(str(810 + i)) for i in range(3)]
+    config = _make_config(tmp_path, discord_token=DISCORD_TOKEN)
+    events: list[MigrationEvent] = []
+    with aioresponses() as mock:
+        for author in authors:
+            mock.get(_user_url(author.id), payload={"id": author.id, "avatar": _HASH})
+        await run_avatars(config, _make_state(), [_export_of(*authors)], events.append)
+
+    progress = [e for e in events if e.status == "progress"]
+    assert [e.message for e in progress] == [
+        "Looking up picture 1 of 3",
+        "Looking up picture 2 of 3",
+        "Looking up picture 3 of 3",
+    ]
+    assert [(e.current, e.total) for e in progress] == [(1, 3), (2, 3), (3, 3)]
+
+
+async def test_no_token_gives_one_notice_and_one_warning_not_one_per_author(
+    tmp_path: Path,
+) -> None:
+    """SC-4.2: 40 authors with local picture paths and no token."""
+    authors = [_make_author(str(900 + i), avatar_url=f"media/avatars/{i}.png") for i in range(40)]
+    config = _make_config(tmp_path)
+    state = _make_state()
+    events: list[MigrationEvent] = []
+    with aioresponses() as mock:
+        await run_avatars(config, state, [_export_of(*authors)], events.append)
+        assert _request_count(mock) == 0
+
+    assert len(state.warnings) == 1
+    warning = _picture_warnings(state)[0]
+    assert warning["phase"] == "avatars"
+    assert warning["count"] == "40"
+    assert "need a Discord token" in warning["message"]
+    notices = [e for e in events if e.status == "notice"]
+    assert len(notices) == 1
+    assert "need a Discord token" in notices[0].message
+    assert events[-1].status == "completed"
+
+
+async def test_a_run_with_a_token_gives_no_token_notice(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, discord_token=DISCORD_TOKEN)
+    events: list[MigrationEvent] = []
+    with aioresponses() as mock:
+        mock.get(_user_url("42"), payload={"id": "42", "avatar": _HASH})
+        await run_avatars(config, _make_state(), [_export_of(_make_author("42"))], events.append)
+    assert [e for e in events if e.status == "notice"] == []
+
+
+async def test_a_token_that_cannot_look_people_up_is_named_in_the_warning(
+    tmp_path: Path,
+) -> None:
+    """SC-2.10 (warning half)."""
+    authors = [_make_author("201"), _make_author("203")]
+    config = _make_config(tmp_path, discord_token=DISCORD_TOKEN)
+    state = _make_state()
+    with aioresponses() as mock:
+        mock.get(_user_url("201"), status=403, body="Forbidden")
+        await run_avatars(config, state, [_export_of(*authors)], lambda e: None)
+    (warning,) = _picture_warnings(state)
+    assert warning["count"] == "2"
+    assert "cannot look up other users" in warning["message"]
+
+
+async def test_each_reason_gets_its_own_counted_warning(tmp_path: Path) -> None:
+    authors = [
+        _make_author("1", avatar_url="http://cdn.discordapp.com/avatars/1/a.png"),
+        _make_author("2", avatar_url="https://evil.example/a.png"),
+        _make_author("3"),
+    ]
+    config = _make_config(tmp_path, discord_token=DISCORD_TOKEN)
+    state = _make_state()
+    with aioresponses() as mock:
+        mock.get(_user_url("3"), payload={"id": "3", "avatar": None})
+        await run_avatars(config, state, [_export_of(*authors)], lambda e: None)
+    by_count = {w["count"]: w["message"] for w in _picture_warnings(state)}
+    assert sorted(by_count) == ["1", "2"]
+    assert "were ignored" in by_count["2"]
+    assert "no Discord picture" in by_count["1"]
+
+
+async def test_a_resumed_phase_replaces_its_warnings_instead_of_repeating_them(
+    tmp_path: Path,
+) -> None:
+    config = _make_config(tmp_path, resume=True)
+    state = _make_state()
+    export = _export_of(_make_author("42"))
+    await run_avatars(config, state, [export], lambda e: None)
+    await run_avatars(config, state, [export], lambda e: None)
+    assert len(_picture_warnings(state)) == 1
+
+
+async def test_a_run_with_nothing_to_do_says_so(tmp_path: Path) -> None:
+    events: list[MigrationEvent] = []
+    state = _make_state()
+    await run_avatars(_make_config(tmp_path), state, [_make_export([])], events.append)
+    assert events[-1].message == "No authors found, so there are no pictures to set."
+    assert _picture_warnings(state) == []
+
+
+def test_every_reason_code_has_warning_text() -> None:
+    """A new reason code in state.py fails here until it has wording."""
+    from discord_ferry.migrator.avatars import _WARNING_TEXT
+    from discord_ferry.state import AVATAR_REASON_CODES
+
+    assert set(_WARNING_TEXT) == set(AVATAR_REASON_CODES)
+    assert all("{count}" in text for text in _WARNING_TEXT.values())
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (401, "token_rejected"),
+        (403, "lookup_not_allowed"),
+        (404, "lookup_failed"),
+        (500, "lookup_failed"),
+    ],
+)
+async def test_the_discord_token_never_reaches_a_log_a_document_or_an_event(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    recorded_sleeps: list[float],
+    status: int,
+    reason: str,
+) -> None:
+    """SC-2.13. The secret is deliberately NOT registered for masking, so a leak shows.
+
+    Discord's error body echoes the token, so anything that stored or printed the error
+    text would carry the sentinel into the checks below.
+    """
+    import json
+    import logging
+
+    from discord_ferry.reporter import generate_markdown_report, generate_report
+    from discord_ferry.state import save_state
+
+    sentinel = "TESTTOKEN-SENTINEL-1208"
+    config = _make_config(tmp_path, discord_token=DISCORD_TOKEN)
+    state = _make_state()
+    export = _export_of(_make_author("42"))
+    events: list[MigrationEvent] = []
+    caplog.set_level(logging.DEBUG)
+    with aioresponses() as mock:
+        for _ in range(3 if status == 500 else 1):
+            mock.get(_user_url("42"), status=status, body=f"rejected {DISCORD_TOKEN}")
+        await run_avatars(config, state, [export], events.append)
+    assert state.author_avatar_reasons == {"42": reason}
+
+    save_state(state, config.output_dir)
+    generate_report(config, state, [export])
+    generate_markdown_report(config, state, [export])
+    texts = [caplog.text]
+    texts += [
+        (config.output_dir / name).read_text(encoding="utf-8")
+        for name in ("state.json", "migration_report.json", "migration_report.md")
+    ]
+    texts += [f"{e.message} {json.dumps(e.detail)} {e.channel_name}" for e in events]
+    for text in texts:
+        assert sentinel not in text
+    assert (config.output_dir / "state.json").exists()
