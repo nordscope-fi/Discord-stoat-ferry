@@ -100,7 +100,7 @@ jobs:
         run: uv sync --locked --extra dev --extra native
 
       - name: Run contract + replay tests
-        run: uv run pytest tests/test_dce_contract.py tests/test_dce_output_replay.py -v
+        run: uv run pytest -n 0 tests/test_dce_contract.py tests/test_dce_output_replay.py -v
 
 
   gates:
