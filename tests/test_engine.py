@@ -8896,6 +8896,22 @@ async def test_a_stale_message_count_does_not_survive_a_repair_that_resends_noth
 
 
 @pytest.mark.usefixtures("repair_permission_unit_boundary")
+async def test_a_stale_high_water_mark_does_not_survive_a_repair_that_resends_nothing(
+    tmp_path: Path,
+) -> None:
+    """The only test that can see the channel_high_water clear.
+
+    A successful resend rewrites the high-water mark, so a clear that was skipped
+    looks identical to one that ran. With nothing to resend, a skipped clear
+    leaves the stale mark, which a later check reads as the expected tail.
+    """
+    state, _ = await _repair_with_state(tmp_path, _state_for_rewrite(), [_export_for(R_D_CHANNEL)])
+    assert R_D_CHANNEL not in state.channel_high_water, (
+        "a stale high-water mark survived a repair that resent nothing"
+    )
+
+
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_the_offsets_clear_is_invisible_to_the_check_by_construction(
     tmp_path: Path,
 ) -> None:
