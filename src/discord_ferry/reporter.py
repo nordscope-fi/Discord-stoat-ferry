@@ -15,6 +15,7 @@ from discord_ferry.core.security import (
     strip_control,
 )
 from discord_ferry.discord.metadata import load_bound_discord_metadata
+from discord_ferry.state import AVATAR_REASON_LABELS, author_picture_counts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -215,6 +216,10 @@ def generate_report(
     report["checklist"] = checklist
     report["invite"] = {"code": state.invite_code, "url": state.invite_url}
     report["native_fidelity"] = dict(state.native_fidelity_counts)
+    # Integers keyed by fixed reason codes, so there is no free text to redact (#1208).
+    report["author_pictures"] = (
+        {"skipped": True} if config.skip_avatars else author_picture_counts(state)
+    )
 
     _write_report(config.output_dir, report, config.token_store)
 
@@ -434,6 +439,20 @@ def generate_markdown_report(
     if state.merge_duplicates_suppressed:
         lines.append(f"| Merge duplicates suppressed | {state.merge_duplicates_suppressed} |")
     lines.append("")
+
+    lines.append("## Author Pictures\n")
+    if config.skip_avatars:
+        lines.append("Skipped. Migrated messages show no author picture.\n")
+    else:
+        picture_counts = author_picture_counts(state)
+        lines.append("| Outcome | Authors |")
+        lines.append("|---------|---------|")
+        lines.append(f"| Authors | {picture_counts['total']} |")
+        lines.append(f"| With a picture | {picture_counts['with_picture']} |")
+        for code, label in AVATAR_REASON_LABELS.items():
+            if code in picture_counts:
+                lines.append(f"| {label} | {picture_counts[code]} |")
+        lines.append("")
 
     if state.invite_code:
         lines.append("\n## Invite\n")
