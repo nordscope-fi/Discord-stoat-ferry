@@ -194,6 +194,43 @@ AVATAR_REASON_LABELS: dict[str, str] = {
 }
 AVATAR_REASON_CODES: tuple[str, ...] = tuple(AVATAR_REASON_LABELS)
 
+#: The ten outcomes of the join-notice decision (#1249): what a run did about Stoat's "user
+#: joined" channel. JOIN_NOTICE_WORDING holds the one fixed sentence for each, used by the
+#: report, the progress log and the warning, so no outcome can reach a reader as free text.
+JoinNoticeCode = Literal[
+    "set",
+    "kept_existing",
+    "would_set",
+    "none_on_discord",
+    "suppressed_on_discord",
+    "channel_not_migrated",
+    "no_discord_token",
+    "no_discord_metadata",
+    "not_recorded",
+    "edit_failed",
+]
+JOIN_NOTICE_WORDING: dict[str, str] = {
+    "set": "The join channel on Stoat now matches Discord's system channel.",
+    "kept_existing": "The Stoat server already had a join channel, so it was left as it is.",
+    "would_set": "Dry run: the join channel would be set to match Discord's system channel.",
+    "none_on_discord": "Discord has no system channel, so no join channel was set.",
+    "suppressed_on_discord": "Discord has join notices turned off, so no join channel was set.",
+    "channel_not_migrated": (
+        "Discord's system channel was not migrated, so no join channel was set."
+    ),
+    "no_discord_token": "No Discord token was given, so no join channel was set.",
+    "no_discord_metadata": "Discord metadata was not available, so no join channel was set.",
+    "not_recorded": (
+        "The saved Discord metadata does not record a system channel, so no join channel was set."
+    ),
+    "edit_failed": "The join channel could not be set on the Stoat server.",
+}
+
+
+def _join_notice_code(value: object) -> str:
+    """A saved outcome code, or "" for anything that is not a known code (a hand-edited file)."""
+    return value if isinstance(value, str) and value in JOIN_NOTICE_WORDING else ""
+
 
 @dataclass
 class MigrationState:
@@ -257,6 +294,10 @@ class MigrationState:
     # Author ID -> one code from AVATAR_REASON_CODES, for an author with no link. Codes only,
     # so structural. Once the phase has seen an author, they are in exactly one of the two maps.
     author_avatar_reasons: dict[str, str] = field(default_factory=dict)
+
+    # One code from JOIN_NOTICE_WORDING: what this run did about Stoat's join-notice channel
+    # (#1249). "" until the channels phase has decided. A code is structural, never free text.
+    join_notice_outcome: str = ""
 
     # Autumn upload cache: "<tag>:<local_path>" -> autumn_file_id (see upload_cache_key).
     # Entries from before #984 have a bare-path key; they are never matched, so a
@@ -1135,6 +1176,7 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "pending_emoji_rewrites": state.pending_emoji_rewrites,
         "author_avatar_links": state.author_avatar_links,
         "author_avatar_reasons": state.author_avatar_reasons,
+        "join_notice_outcome": state.join_notice_outcome,
         "upload_cache": state.upload_cache,
         "author_names": state.author_names,
         "pending_pins": [list(p) for p in state.pending_pins],
@@ -1230,6 +1272,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             pending_emoji_rewrites=data.get("pending_emoji_rewrites", {}),
             author_avatar_links=data.get("author_avatar_links", {}),
             author_avatar_reasons=data.get("author_avatar_reasons", {}),
+            join_notice_outcome=_join_notice_code(data.get("join_notice_outcome", "")),
             upload_cache=data.get("upload_cache", {}),
             author_names=data.get("author_names", {}),
             pending_pins=[(p[0], p[1]) for p in data.get("pending_pins", []) if len(p) == 2],

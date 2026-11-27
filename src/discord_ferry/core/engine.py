@@ -737,6 +737,8 @@ async def run_migration(
             #     author_avatar_links / author_avatar_reasons (every author is looked up
             #     again each run, so a changed picture is picked up and a reason that
             #     depended on the token is retried, #1208);
+            #     join_notice_outcome (the channels phase decides it again each run,
+            #     against the Stoat server as it is then, #1249);
             #     thread_strategy, which describes THIS run and is set from
             #     config after this block, at the point the four state paths
             #     converge.
