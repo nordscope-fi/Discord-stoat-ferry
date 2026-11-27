@@ -181,6 +181,34 @@ async def fetch_channel(
     return _parse_channel(await _discord_get_object(session, token, f"/channels/{channel_id}"))
 
 
+async def fetch_user(session: aiohttp.ClientSession, token: str, user_id: str) -> dict[str, Any]:
+    """Fetch one Discord user object (``GET /users/{id}``).
+
+    Args:
+        session: An active aiohttp ClientSession.
+        token: Discord token, sent as given in the ``Authorization`` header.
+        user_id: Discord user id. It must be a snowflake, so it can never alter the
+            request path.
+
+    Returns:
+        The raw user data dict. ``avatar`` holds the picture hash, or ``None``.
+
+    Raises:
+        DiscordAuthError: On 401 Unauthorized.
+        DiscordForbiddenError: On 403 Forbidden.
+        MigrationError: On a malformed id or response, a 404, or any other error that
+            does not retry.
+    """
+    # A snowflake is at most 20 digits. Checking the length first keeps an export-supplied id of
+    # thousands of digits from reaching int(), which raises ValueError past 4300 digits.
+    if len(user_id) > 20 or _source_id(user_id) is None:
+        raise MigrationError("Discord user id is not a snowflake")
+    data = await _discord_get_object(session, token, f"/users/{user_id}")
+    if not isinstance(data, dict):
+        raise MigrationError("Discord returned an unexpected user response")
+    return data
+
+
 def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
     """Parse a rate-limit delay (seconds) from standard headers; None if absent/non-numeric.
 

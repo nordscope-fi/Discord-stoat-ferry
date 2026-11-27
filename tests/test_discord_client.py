@@ -1120,3 +1120,93 @@ def test_discord_forbidden_error_is_a_migration_error_but_not_an_auth_error() ->
 
     assert issubclass(DiscordForbiddenError, MigrationError)
     assert not issubclass(DiscordForbiddenError, DiscordAuthError)
+
+
+# ---------------------------------------------------------------------------
+# fetch_user (#1208)
+# ---------------------------------------------------------------------------
+
+
+async def test_fetch_user_requests_the_user_route_with_the_token(
+    mock_discord: aioresponses,
+) -> None:
+    from discord_ferry.discord.client import fetch_user
+
+    mock_discord.get(
+        f"{DISCORD_API}/users/1505988963628879902",
+        payload={"id": "1505988963628879902", "avatar": "4551a51a7078abcdef0123456789abcd"},
+    )
+    async with aiohttp.ClientSession() as session:
+        user = await fetch_user(session, TOKEN, "1505988963628879902")
+
+    assert user["avatar"] == "4551a51a7078abcdef0123456789abcd"
+    request = next(iter(mock_discord.requests.values()))[0]
+    assert request.kwargs["headers"]["Authorization"] == TOKEN
+
+
+async def test_fetch_user_returns_a_null_avatar_unchanged(mock_discord: aioresponses) -> None:
+    from discord_ferry.discord.client import fetch_user
+
+    mock_discord.get(f"{DISCORD_API}/users/42", payload={"id": "42", "avatar": None})
+    async with aiohttp.ClientSession() as session:
+        user = await fetch_user(session, TOKEN, "42")
+    assert user["avatar"] is None
+
+
+@pytest.mark.parametrize(
+    "user_id", ["abc", "../guilds/1", "1/../2", "", "٣", "0", "12 3", "1" * 21, "1" * 5000]
+)
+async def test_fetch_user_refuses_a_non_snowflake_before_any_request(
+    mock_discord: aioresponses, user_id: str
+) -> None:
+    from discord_ferry.discord.client import fetch_user
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError, match="not a snowflake"):
+            await fetch_user(session, TOKEN, user_id)
+    assert mock_discord.requests == {}
+
+
+async def test_fetch_user_unknown_user_is_a_plain_migration_error(
+    mock_discord: aioresponses,
+) -> None:
+    from discord_ferry.discord.client import fetch_user
+    from discord_ferry.errors import DiscordForbiddenError
+
+    mock_discord.get(
+        f"{DISCORD_API}/users/1", status=404, payload={"code": 10013, "message": "Unknown User"}
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as caught:
+            await fetch_user(session, TOKEN, "1")
+    assert not isinstance(caught.value, DiscordForbiddenError | DiscordAuthError)
+
+
+async def test_fetch_user_401_raises_discord_auth_error(mock_discord: aioresponses) -> None:
+    from discord_ferry.discord.client import fetch_user
+
+    mock_discord.get(f"{DISCORD_API}/users/1", status=401, body="401: Unauthorized")
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(DiscordAuthError):
+            await fetch_user(session, TOKEN, "1")
+
+
+async def test_fetch_user_403_raises_the_forbidden_error(mock_discord: aioresponses) -> None:
+    from discord_ferry.discord.client import fetch_user
+    from discord_ferry.errors import DiscordForbiddenError
+
+    mock_discord.get(f"{DISCORD_API}/users/1", status=403, body="Forbidden")
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(DiscordForbiddenError):
+            await fetch_user(session, TOKEN, "1")
+
+
+async def test_fetch_user_refuses_a_response_that_is_not_an_object(
+    mock_discord: aioresponses,
+) -> None:
+    from discord_ferry.discord.client import fetch_user
+
+    mock_discord.get(f"{DISCORD_API}/users/1", payload=["not", "an", "object"])
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError, match="unexpected user response"):
+            await fetch_user(session, TOKEN, "1")
