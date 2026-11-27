@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import re
 import time
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
 import aiohttp
+from yarl import URL
 
 from discord_ferry.core.atomicio import ensure_output_subdir, write_bytes_no_follow
 from discord_ferry.core.events import MigrationEvent
@@ -27,6 +29,66 @@ if TYPE_CHECKING:
     from discord_ferry.state import MigrationState
 
 logger = logging.getLogger(__name__)
+
+#: Longest masquerade avatar link Stoat accepts (``#[validate(length(min = 1, max = 256))]``).
+AVATAR_LINK_MAX_LENGTH = 256
+
+_DISCORD_CDN = "https://cdn.discordapp.com"
+_SNOWFLAKE = r"[0-9]{1,20}"
+_HASH = r"(?:a_)?[0-9a-f]+"
+_IMAGE_SUFFIX = r"\.(?:png|jpe?g|webp|gif)"
+_USER_ID = re.compile(_SNOWFLAKE)
+_AVATAR_HASH = re.compile(_HASH)
+#: The documented picture paths on Discord's CDN: a user picture, a default picture and a
+#: per-server picture. Matched against the raw path, so an encoded separator never matches.
+_PICTURE_PATH = re.compile(
+    "|".join(
+        (
+            rf"/avatars/{_SNOWFLAKE}/{_HASH}{_IMAGE_SUFFIX}",
+            r"/embed/avatars/[0-9]\.png",
+            rf"/guilds/{_SNOWFLAKE}/users/{_SNOWFLAKE}/avatars/{_HASH}{_IMAGE_SUFFIX}",
+        )
+    )
+)
+
+ExportLinkKind = Literal["link", "unusable", "skip"]
+
+
+def classify_export_link(url: str) -> tuple[ExportLinkKind, str]:
+    """Decide whether an export ``avatarUrl`` can be used as a picture link.
+
+    Returns ``("link", cleaned_link)`` for an https link on Discord's own picture host
+    (``remote_media_refusal`` accepts it) whose path is a documented picture path, with the
+    query string and fragment removed. Returns ``("unusable", "")`` for an http(s) link that
+    ``remote_media_refusal`` refuses. Returns ``("skip", "")`` for everything else: an empty
+    value, a local file name (the ``--media`` case, which is never read), or a Discord-host
+    link with an undocumented path. The caller then looks the author up instead.
+
+    The caller applies ``AVATAR_LINK_MAX_LENGTH``.
+    """
+    if not url.lower().startswith(("http://", "https://")):
+        return "skip", ""
+    if remote_media_refusal(url) is not None:
+        return "unusable", ""
+    target = URL(url)
+    if _PICTURE_PATH.fullmatch(target.raw_path) is None:
+        return "skip", ""
+    return "link", f"https://{target.host}{target.raw_path}"
+
+
+def lookup_avatar_link(user_id: str, avatar_hash: object) -> str | None:
+    """Build the picture link for a looked-up user, or ``None`` when it is not safe to.
+
+    The id must be all digits and the hash must be ``(a_)?`` followed by lower-case hex, so
+    neither can add a path segment, a query or a host to the link. An animated picture (hash
+    starting ``a_``) gets ``.gif``, anything else ``.png``.
+    """
+    if _USER_ID.fullmatch(user_id) is None:
+        return None
+    if not isinstance(avatar_hash, str) or _AVATAR_HASH.fullmatch(avatar_hash) is None:
+        return None
+    extension = "gif" if avatar_hash.startswith("a_") else "png"
+    return f"{_DISCORD_CDN}/avatars/{user_id}/{avatar_hash}.{extension}"
 
 
 def _avatar_extension(content_type: str, url: str) -> str:

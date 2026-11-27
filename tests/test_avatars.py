@@ -14,7 +14,13 @@ from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.migrator import avatars as avatars_module
-from discord_ferry.migrator.avatars import _download_remote_avatar, run_avatars
+from discord_ferry.migrator.avatars import (
+    AVATAR_LINK_MAX_LENGTH,
+    _download_remote_avatar,
+    classify_export_link,
+    lookup_avatar_link,
+    run_avatars,
+)
 from discord_ferry.parser.models import (
     DCEAuthor,
     DCEChannel,
@@ -84,6 +90,127 @@ def _make_export(messages: list[DCEMessage] | None = None) -> DCEExport:
         channel=DCEChannel(id="ch1", type=0, name="general"),
         messages=messages or [],
     )
+
+
+# ---------------------------------------------------------------------------
+# Pure link functions (#1208)
+# ---------------------------------------------------------------------------
+
+_CDN = "https://cdn.discordapp.com"
+_HASH = "4551a51a7078abcdef0123456789abcd"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        # SC-3.1: the query string is removed.
+        (f"{_CDN}/avatars/1/abc.png?size=128", f"{_CDN}/avatars/1/abc.png"),
+        # SC-3.2: the second Discord picture host, with no query to remove.
+        (
+            "https://media.discordapp.net/avatars/1/abc.webp",
+            "https://media.discordapp.net/avatars/1/abc.webp",
+        ),
+        # Host case, an explicit default port and a fragment all normalise away.
+        ("https://CDN.DiscordApp.com:443/avatars/1/abc.gif#x", f"{_CDN}/avatars/1/abc.gif"),
+        # Animated hashes keep their a_ prefix.
+        (f"{_CDN}/avatars/1/a_0f1e.gif", f"{_CDN}/avatars/1/a_0f1e.gif"),
+        # The two other documented picture paths.
+        (f"{_CDN}/embed/avatars/3.png", f"{_CDN}/embed/avatars/3.png"),
+        (
+            f"{_CDN}/guilds/5/users/1/avatars/abc.png?size=64",
+            f"{_CDN}/guilds/5/users/1/avatars/abc.png",
+        ),
+    ],
+)
+def test_classify_export_link_accepts_documented_picture_paths(url: str, expected: str) -> None:
+    assert classify_export_link(url) == ("link", expected)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://cdn.discordapp.com/avatars/1/a.png",  # not https
+        "https://evil.example/avatars/1/a.png",  # not a Discord host
+        "https://user:pw@cdn.discordapp.com/avatars/1/a.png",  # carries credentials
+        "https://cdn.discordapp.com:8443/avatars/1/a.png",  # non-default port
+        "https://cdn.discordapp.com.evil.example/avatars/1/a.png",  # lookalike host
+        "https://127.0.0.1/avatars/1/a.png",  # literal address
+    ],
+)
+def test_classify_export_link_refuses_what_remote_media_refusal_refuses(url: str) -> None:
+    assert classify_export_link(url) == ("unusable", "")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "",  # no picture in the export
+        "media/avatars/alice.png",  # the --media case: a local path, never read
+        "../../etc/x.png",  # a local path that escapes the export folder
+        "/etc/passwd",
+        f"{_CDN}/avatars/webhook.png",  # SC-3.4: Discord host, undocumented path
+        f"{_CDN}/attachments/1/2/file.png",  # a Discord file that is not a picture path
+        f"{_CDN}/avatars/1/a%2Fb.png",  # an encoded separator never matches
+        f"{_CDN}/avatars/1/abc.exe",  # extension outside the picture set
+        f"{_CDN}/embed/avatars/12.png",  # two digits
+        f"{_CDN}/",
+    ],
+)
+def test_classify_export_link_falls_through_when_there_is_nothing_usable(url: str) -> None:
+    assert classify_export_link(url) == ("skip", "")
+
+
+def test_classify_export_link_does_not_decide_the_length() -> None:
+    """The caller applies the 256 limit, so an over-long accepted link still comes back."""
+    prefix = f"{_CDN}/avatars/1/"
+    url = prefix + "a" * (AVATAR_LINK_MAX_LENGTH + 1 - len(prefix) - len(".png")) + ".png"
+    kind, link = classify_export_link(url)
+    assert kind == "link"
+    assert len(link) == AVATAR_LINK_MAX_LENGTH + 1
+
+
+@pytest.mark.parametrize(
+    ("user_id", "avatar_hash", "expected"),
+    [
+        # SC-2.1
+        ("1505988963628879902", _HASH, f"{_CDN}/avatars/1505988963628879902/{_HASH}.png"),
+        # SC-2.2: an animated hash gets .gif
+        ("42", f"a_{_HASH}", f"{_CDN}/avatars/42/a_{_HASH}.gif"),
+    ],
+)
+def test_lookup_avatar_link_builds_the_documented_cdn_path(
+    user_id: str, avatar_hash: str, expected: str
+) -> None:
+    assert lookup_avatar_link(user_id, avatar_hash) == expected
+
+
+@pytest.mark.parametrize(
+    ("user_id", "avatar_hash"),
+    [
+        ("42", "../../x?y"),  # SC-2.7
+        ("42", "ABCDEF"),  # upper case is not what Discord returns
+        ("42", "abc.png"),
+        ("42", "a_"),
+        ("42", ""),
+        ("42", "abc\n"),  # fullmatch, not $, so a trailing newline is refused
+        ("42", None),
+        ("42", 7),
+        ("abc/../1", _HASH),  # SC-2.8
+        ("", _HASH),
+        ("٣", _HASH),
+        ("1" * 21, _HASH),
+    ],
+)
+def test_lookup_avatar_link_refuses_anything_that_could_change_the_url(
+    user_id: str, avatar_hash: object
+) -> None:
+    assert lookup_avatar_link(user_id, avatar_hash) is None
+
+
+def test_a_built_lookup_link_always_fits_stoats_limit() -> None:
+    link = lookup_avatar_link("9" * 20, "a_" + "f" * 64)
+    assert link is not None
+    assert len(link) <= AVATAR_LINK_MAX_LENGTH
 
 
 # ---------------------------------------------------------------------------
