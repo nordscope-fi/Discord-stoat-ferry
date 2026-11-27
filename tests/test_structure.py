@@ -26,6 +26,7 @@ from discord_ferry.discord.metadata import (
     PermissionPair,
     RoleMeta,
     RoleOverride,
+    load_bound_discord_metadata,
     load_discord_metadata_for_resume,
     save_discord_metadata,
 )
@@ -54,7 +55,13 @@ from discord_ferry.parser.models import (
     DCEMessage,
     DCERole,
 )
-from discord_ferry.state import DeliveryRef, MigrationState, load_state, read_delivery_receipt
+from discord_ferry.state import (
+    JOIN_NOTICE_WORDING,
+    DeliveryRef,
+    MigrationState,
+    load_state,
+    read_delivery_receipt,
+)
 from discord_ferry.state import save_state as save_state_real
 from tests.local_cdn import ENDLESS_LIMIT, RewritingSession, local_cdn
 from tests.stoat_ids import stoat_id
@@ -9084,3 +9091,147 @@ async def test_description_cap_skipped_without_a_marker(tmp_path: Path) -> None:
     bodies, state = await _description_bodies(tmp_path, "Cosy", "")
     assert [b["description"] for b in bodies] == ["Cosy"]
     assert not [w for w in state.warnings if w.get("type") == "server_description_not_migrated"]
+
+
+# ---------------------------------------------------------------------------
+# Join-notice channel (#1249)
+# ---------------------------------------------------------------------------
+
+
+def _join_meta(
+    system_channel_id: str | None = "100", system_channel_flags: int = 0, guild_id: str = "111"
+) -> DiscordMetadata:
+    return DiscordMetadata(
+        guild_id=guild_id,
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        system_channel_id=system_channel_id,
+        system_channel_flags=system_channel_flags,
+    )
+
+
+_JOIN_MAPPED = {"100": "S100"}
+
+
+@pytest.mark.parametrize(
+    ("token", "meta", "channel_map", "dry_run", "expected"),
+    [
+        pytest.param("tok", _join_meta(), _JOIN_MAPPED, False, None, id="needs-stoat"),
+        pytest.param(None, _join_meta(), _JOIN_MAPPED, False, "no_discord_token", id="no-token"),
+        pytest.param("", None, {}, False, "no_discord_token", id="empty-token-wins-over-meta"),
+        pytest.param("tok", None, _JOIN_MAPPED, False, "no_discord_metadata", id="no-metadata"),
+        pytest.param(
+            "tok", _join_meta(None), _JOIN_MAPPED, False, "not_recorded", id="not-recorded"
+        ),
+        pytest.param(
+            "tok", _join_meta(""), _JOIN_MAPPED, False, "none_on_discord", id="none-on-discord"
+        ),
+        pytest.param(
+            "tok",
+            _join_meta(system_channel_flags=1),
+            _JOIN_MAPPED,
+            False,
+            "suppressed_on_discord",
+            id="suppressed",
+        ),
+        pytest.param(
+            "tok",
+            _join_meta(system_channel_flags=0b101),
+            _JOIN_MAPPED,
+            False,
+            "suppressed_on_discord",
+            id="suppressed-with-other-bits",
+        ),
+        pytest.param(
+            "tok",
+            _join_meta(system_channel_flags=0b100),
+            _JOIN_MAPPED,
+            False,
+            None,
+            id="only-another-bit",
+        ),
+        pytest.param("tok", _join_meta(), {}, False, "channel_not_migrated", id="not-migrated"),
+        pytest.param("tok", _join_meta(), _JOIN_MAPPED, True, "would_set", id="dry-run"),
+        pytest.param(
+            "tok",
+            _join_meta(system_channel_flags=1),
+            _JOIN_MAPPED,
+            True,
+            "suppressed_on_discord",
+            id="dry-run-still-suppressed",
+        ),
+        pytest.param(
+            "tok", _join_meta(), {}, True, "channel_not_migrated", id="dry-run-still-unmapped"
+        ),
+    ],
+)
+def test_join_notice_decision_without_stoat(
+    tmp_path: Path,
+    token: str | None,
+    meta: DiscordMetadata | None,
+    channel_map: dict[str, str],
+    dry_run: bool,
+    expected: str | None,
+) -> None:
+    """SC-1.1 to SC-1.7: every outcome that needs no Stoat request, and the one that does."""
+    config = _make_config(tmp_path, discord_token=token, dry_run=dry_run)
+    state = MigrationState(channel_map=dict(channel_map))
+
+    outcome = structure_module._decide_join_notice(config, state, meta)
+
+    assert outcome == expected
+    if expected is not None:
+        assert expected in JOIN_NOTICE_WORDING
+
+
+def test_join_notice_decision_reads_no_usable_metadata_as_absent(tmp_path: Path) -> None:
+    """SC-1.6: a missing file and another server's file both give no_discord_metadata."""
+    exports = [_make_export(guild_id="111", channel_id="100")]
+    config = _make_config(tmp_path, discord_token="tok")
+    state = MigrationState(channel_map=dict(_JOIN_MAPPED))
+
+    missing = load_bound_discord_metadata(config, exports)
+    assert structure_module._decide_join_notice(config, state, missing) == "no_discord_metadata"
+
+    save_discord_metadata(_join_meta(guild_id="999"), tmp_path)
+    wrong_guild = load_bound_discord_metadata(config, exports)
+    assert wrong_guild is None
+    assert structure_module._decide_join_notice(config, state, wrong_guild) == "no_discord_metadata"
+
+
+def test_join_notice_decision_with_metadata_from_an_older_ferry(tmp_path: Path) -> None:
+    """SC-3.4 (decision half): a saved file without the keys decides not_recorded."""
+    legacy = {
+        "guild_id": "111",
+        "fetched_at": "t",
+        "server_default_permissions": 0,
+        "role_permissions": {},
+        "channel_metadata": {},
+    }
+    (tmp_path / "discord_metadata.json").write_text(json.dumps(legacy))
+    config = _make_config(tmp_path, discord_token="tok")
+    bound = load_bound_discord_metadata(config, [_make_export(guild_id="111")])
+
+    outcome = structure_module._decide_join_notice(config, MigrationState(), bound)
+
+    assert outcome == "not_recorded"
+
+
+@pytest.mark.parametrize("bad_flags", ["1", [1], True])
+def test_join_notice_decision_survives_hand_edited_flags(tmp_path: Path, bad_flags: object) -> None:
+    """SC-3.5 (decision half): flags that are not a whole number load as 0 and never raise."""
+    save_discord_metadata(_join_meta(), tmp_path)
+    path = tmp_path / "discord_metadata.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["system_channel_flags"] = bad_flags
+    path.write_text(json.dumps(raw))
+    config = _make_config(tmp_path, discord_token="tok", dry_run=True)
+    bound = load_bound_discord_metadata(config, [_make_export(guild_id="111")])
+
+    outcome = structure_module._decide_join_notice(
+        config, MigrationState(channel_map=dict(_JOIN_MAPPED)), bound
+    )
+
+    assert outcome == "would_set"
