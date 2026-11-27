@@ -248,7 +248,7 @@ Payload fields:
 | Field | Type | Notes |
 |-------|------|-------|
 | `name` | string | Displayed username, the Discord author's display name |
-| `avatar` | string | Autumn CDN URL of the author's avatar |
+| `avatar` | string | URL of the author's picture, 1 to 256 characters. Ferry sends a link on Discord's picture servers, which the Stoat client loads through its image proxy. It is never an Autumn file, because Stoat refuses an unattached Autumn file and deletes it after one hour |
 | `colour` | string | Hex colour string e.g. `"#5865F2"` (British spelling required) |
 
 Permission requirements:
@@ -274,9 +274,9 @@ File size limits by tag:
 | `emojis` | 500 KB | Custom emoji |
 
 Ferry's uploader maintains an in-memory cache keyed on the local file path. If the same file is
-encountered more than once (e.g. a user who appears as author in thousands of messages), their avatar
-is uploaded to Autumn only on the first occurrence and the returned Autumn file id is cached.
-Ferry reuses that id for all later messages and builds the avatar URL from it at send time.
+encountered more than once (e.g. one attachment referenced by several messages), it is uploaded to
+Autumn only on the first occurrence and the returned Autumn file id is reused. Author pictures are
+not uploaded: see Masquerade above.
 
 A conservative 0.5 s sleep is inserted between Autumn upload requests to avoid bursting the
 catch-all bucket.

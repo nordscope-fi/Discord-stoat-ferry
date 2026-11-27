@@ -59,7 +59,7 @@ including `server_channels`, `server_emoji`, and `body_limit_size`.
 
 ## Autumn File Storage
 
-Autumn is Stoat's file storage service. Uploaded attachments, avatars, and emoji are stored here. Ferry uploads all media to Autumn automatically.
+Autumn is Stoat's file storage service. Uploaded attachments and emoji are stored here. Ferry uploads them to Autumn automatically. Author pictures are not stored in Autumn: each message links to the author's picture on Discord's own picture servers.
 
 Autumn supports two storage backends:
 

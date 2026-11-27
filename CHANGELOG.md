@@ -30,6 +30,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - The test suite no longer passes the caller's git location variables (`GIT_DIR`, `GIT_COMMON_DIR` and the rest) to the git commands it runs. A test's `git init` or `git config` could otherwise act on the caller's own repository and turn it into a bare one (#1639).
 
+## [3.8.0] - 2026-11-27
+
+### Fixed
+
+- Migrated messages no longer lose their author's picture after an hour. Ferry used to upload each picture to Stoat's file store without attaching it to anything, and Stoat refuses such a file and deletes it after one hour, so every message lost its author's picture while the Avatars phase reported success. Ferry now looks each author up once on Discord (`GET /users/{id}`, needs a Discord token) and links the message to the picture on Discord's own picture servers. A link already in the export is used when it is on `cdn.discordapp.com` or `media.discordapp.net`, and no token is needed for it (#1208).
+
+### Changed
+
+- `--skip-avatars` (and the GUI option, now called "Skip author pictures") now means migrated messages show no picture, also when a run is resumed with it; picture links saved by an earlier run of that migration are dropped and are not looked up again later. Before, it moved the uploads into the messages phase (#1208).
+- The migration report, `migration_report.json` and the progress log say how many authors got a picture and why the others did not: no Discord picture, no Discord token, lookup failed, token rejected, token cannot look up users, export link not accepted, or link too long. A run without a token says once that pictures need one (#1208).
+- Only new migrations change. Messages that are already migrated are left alone. An old `state.json` still loads, its `avatar_cache` entries are never used as pictures, and the next save drops them (#1208).
+
 ## [3.7.9] - 2026-11-26
 
 ### Fixed

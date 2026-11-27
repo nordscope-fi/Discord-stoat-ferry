@@ -125,7 +125,7 @@ does not move, replace, or delete those files.
 | `--dce-parallel INT` | | 1 | Discord channels DiscordChatExporter exports in parallel before migration. This does not change Ferry's migration-channel or API-request workers. |
 | `--max-concurrent-channels INT` | | 3 | Channels migrated in parallel. Raise only on self-hosted instances. |
 | `--max-concurrent-requests INT` | | 5 | Concurrent API calls across all channel workers. Raise only on self-hosted instances. |
-| `--skip-avatars` | | false | Skip the avatar pre-flight phase; avatars still upload on demand during messages |
+| `--skip-avatars` | | false | Skip author pictures; migrated messages show no picture |
 | `--validate-after` | | false | After migration, verify every channel, role, category and emoji by ID (same as `ferry check`; results in `state.json`) |
 | `--cleanup-orphans` | | false | Detect and report unreferenced Autumn uploads after migration (report-only; no files are deleted) |
 | `--force-unlock` | | false | Override a stale migration lock on the target Stoat server, or continue without a lock when Ferry cannot take one (it records a warning) |

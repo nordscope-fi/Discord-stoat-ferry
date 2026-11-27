@@ -76,7 +76,7 @@ Insert each message into the `messages` collection using the custom ULID as the 
 | `channel` | string | The Stoat channel ID the message belongs to |
 | `author` | string | The Stoat user ID that "sent" the message (the ferry account) |
 | `content` | string | The message text |
-| `masquerade` | object | `{"name": "AuthorName", "avatar": "https://autumn-url/...", "colour": "#hex"}` |
+| `masquerade` | object | `{"name": "AuthorName", "avatar": "https://cdn.discordapp.com/avatars/...", "colour": "#hex"}` |
 
 ```javascript
 db.messages.insertOne({
@@ -86,7 +86,7 @@ db.messages.insertOne({
     content: "Hey everyone, welcome to the server!",
     masquerade: {
         name: "JaneDoe",
-        avatar: "https://your-autumn-instance/avatars/abc123",
+        avatar: "https://cdn.discordapp.com/avatars/123456789012345678/0123456789abcdef0123456789abcdef.png",
         colour: "#7289da"
     }
 });
@@ -98,7 +98,7 @@ Stoat does not validate foreign keys on direct database inserts, but clients wil
 
 - The `channel` value references an existing channel document.
 - The `author` value references an existing user document.
-- Any `avatar` URL in the masquerade object points to a file that actually exists in Autumn.
+- Any `avatar` URL in the masquerade object is at most 256 characters and points to an image that is still served, such as a picture on Discord's own picture servers.
 
 ### Step 4: Notify real-time clients via Redis
 
