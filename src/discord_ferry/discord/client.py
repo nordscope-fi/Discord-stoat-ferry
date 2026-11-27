@@ -18,7 +18,7 @@ from discord_ferry.discord.models import (
     PermissionOverwrite,
     normalize_channel_position,
 )
-from discord_ferry.errors import DiscordAuthError, MigrationError
+from discord_ferry.errors import DiscordAuthError, DiscordForbiddenError, MigrationError
 from discord_ferry.uploader.autumn import get_tag_size_limit
 
 if TYPE_CHECKING:
@@ -248,7 +248,7 @@ async def _discord_request(session: aiohttp.ClientSession, token: str, path: str
                 if resp.status == 401:
                     raise DiscordAuthError("Discord token is invalid or expired")
                 if resp.status == 403:
-                    raise MigrationError(
+                    raise DiscordForbiddenError(
                         "Insufficient permissions to read guild metadata. "
                         "The token must belong to a member of the guild."
                     )
