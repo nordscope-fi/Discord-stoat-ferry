@@ -13567,3 +13567,74 @@ async def test_release_own_marker_is_whole_description(tmp_path: Path) -> None:
 async def test_release_keeps_user_text_with_single_spacing(tmp_path: Path) -> None:
     patched, _events, _state = await _run_release(tmp_path, f"before {_OWN_LOCK} after", _OWN_LOCK)
     assert patched == ["before after"]
+
+
+# ---------------------------------------------------------------------------
+# Join-notice channel (#1249): resume
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_a_resume_after_a_crash_between_the_join_edit_and_the_save_edits_nothing_again(
+    tmp_path: Path,
+) -> None:
+    """SC-I2: the resumed channels phase reads the server and finds its own edit.
+
+    The first run edits the server and is killed before the state is saved, so state.json
+    still says the channels phase was running. The resume reads our channel back and sends
+    no second PATCH. The phase override calls the real _apply_join_notice, because the real
+    channels phase needs a permission operation that this unit does not set up.
+    """
+    from discord_ferry.discord.metadata import load_discord_metadata
+    from discord_ferry.migrator.api import get_session
+    from discord_ferry.migrator.structure import _apply_join_notice
+    from discord_ferry.state import save_state
+
+    server_id, mapped = valid_stoat_id(9000), valid_stoat_id(100)
+    meta = DiscordMetadata(
+        _GUILD_ID, "2024-01-01T00:00:00+00:00", 0, {}, {}, system_channel_id="100"
+    )
+    save_discord_metadata(meta, tmp_path)
+    save_state(
+        MigrationState(
+            current_phase="channels",
+            started_at="2024-01-01T00:00:00+00:00",
+            stoat_server_id=server_id,
+            channel_map={"100": mapped},
+        ),
+        tmp_path,
+    )
+    config = _make_config(
+        tmp_path, discord_token="test-discord-token", discord_server_id=_GUILD_ID, resume=True
+    )
+    server_url = f"{config.stoat_url}/servers/{server_id}"
+
+    async def channels(
+        config: FerryConfig, state: MigrationState, exports: list[Any], emit: EventCallback
+    ) -> None:
+        async with get_session(config) as session:
+            await _apply_join_notice(
+                config, state, session, load_discord_metadata(config.output_dir), emit
+            )
+
+    with aioresponses() as m:
+        # First run: no join channel yet, the edit goes through, the process dies.
+        m.get(server_url, payload={"_id": server_id})
+        m.patch(server_url, payload={"_id": server_id})
+        crashed = MigrationState(stoat_server_id=server_id, channel_map={"100": mapped})
+        async with aiohttp.ClientSession() as session:
+            await _apply_join_notice(config, crashed, session, meta, lambda event: None)
+        assert crashed.join_notice_outcome == "set"
+
+        # The resume: the server now names our channel.
+        m.get(
+            server_url,
+            payload={"_id": server_id, "system_messages": {"user_joined": mapped}},
+        )
+        state = await run_migration(
+            config, lambda event: None, phase_overrides={**_NOOP_OVERRIDES, "channels": channels}
+        )
+        patches = sum(len(calls) for key, calls in m.requests.items() if key[0] == "PATCH")
+
+    assert state.join_notice_outcome == "set"
+    assert patches == 1

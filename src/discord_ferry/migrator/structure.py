@@ -1826,6 +1826,8 @@ async def run_channels(
             _nsfw,
         ) in channels_to_create:
             state.channel_map[channel.id] = f"dry-ch-{channel.id}"
+        # No session in a dry run: the decision stops at would_set, before any Stoat request.
+        await _apply_join_notice(config, state, None, discord_metadata, on_event)
         on_event(
             MigrationEvent(
                 phase="channels",
@@ -2300,6 +2302,11 @@ async def run_channels(
                 state.stoat_server_id,
                 all_categories,
             )
+
+        # The join-notice channel (#1249). Outside the category block, so a server whose
+        # channels have no categories is still decided, and inside the session, which a
+        # server edit needs.
+        await _apply_join_notice(config, state, session, discord_metadata, on_event)
 
     # S5: graceful-degrade — slowmode/user_limit need Discord metadata.
     if discord_metadata is None:

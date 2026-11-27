@@ -9482,3 +9482,116 @@ def test_join_notice_rules_that_overlap_keep_the_design_order(
     state = MigrationState(channel_map=dict(channel_map))
 
     assert structure_module._decide_join_notice(config, state, meta) == expected
+
+
+def _join_export() -> DCEExport:
+    return _make_export(channel_id="100", channel_name="general", category_id="", category="")
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_run_channels_sets_the_join_notice_for_a_server_without_categories(
+    channel_attributes_only, tmp_path: Path
+) -> None:
+    """SC-1.8 and SC-4.7: decided and reported although there is no category block to run."""
+    save_discord_metadata(_join_meta(), tmp_path)
+    config = _make_config(tmp_path, discord_token="tok")
+    state = MigrationState(stoat_server_id="srv1")
+    events: list[MigrationEvent] = []
+    bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "S100", "name": "general"})
+        m.get(_JOIN_SERVER_URL, payload={"_id": "srv1"})
+        m.patch(
+            _JOIN_SERVER_URL,
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: bodies.append(kwargs.get("json", {})),
+        )
+        await run_channels(config, state, [_join_export()], events.append)
+
+    assert state.channel_map == {"100": "S100"}
+    assert bodies == [{"system_messages": {"user_joined": "S100"}}]  # and no categories upsert
+    assert state.join_notice_outcome == "set"
+    announced = [e for e in events if e.message == JOIN_NOTICE_WORDING["set"]]
+    assert [(e.phase, e.status) for e in announced] == [("channels", "progress")]
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_run_channels_sets_the_join_notice_after_the_category_upsert(
+    channel_attributes_only, tmp_path: Path
+) -> None:
+    """The categories PATCH goes first, then the join channel, in the open session."""
+    save_discord_metadata(_join_meta(), tmp_path)
+    config = _make_config(tmp_path, discord_token="tok")
+    state = MigrationState(stoat_server_id="srv1", category_map={"cat1": "test-cat-id-1"})
+    exports = [
+        _make_export(channel_id="100", channel_name="general", category_id="cat1", category="Main")
+    ]
+    bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "S100", "name": "general"})
+        m.get(_JOIN_SERVER_URL, payload={"_id": "srv1"})
+        m.patch(
+            _JOIN_SERVER_URL,
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: bodies.append(kwargs.get("json", {})),
+        )
+        await run_channels(config, state, exports, [].append)
+
+    assert [sorted(body) for body in bodies] == [["categories"], ["system_messages"]]
+    assert state.join_notice_outcome == "set"
+
+
+@pytest.mark.parametrize(("flags", "expected"), [(0, "would_set"), (1, "suppressed_on_discord")])
+async def test_a_dry_run_decides_the_join_notice_and_sends_nothing(
+    tmp_path: Path, flags: int, expected: str
+) -> None:
+    """SC-1.7: every decision up to the Stoat read runs, and nothing reaches Stoat."""
+    save_discord_metadata(_join_meta(system_channel_flags=flags), tmp_path)
+    config = _make_config(tmp_path, discord_token="tok", dry_run=True)
+    state = MigrationState(stoat_server_id="srv1")
+    events: list[MigrationEvent] = []
+
+    with aioresponses() as m:
+        await run_channels(config, state, [_join_export()], events.append)
+        assert not m.requests
+
+    assert state.channel_map == {"100": "dry-ch-100"}
+    assert state.join_notice_outcome == expected
+    assert [e.message for e in events].count(JOIN_NOTICE_WORDING[expected]) == 1
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
+@pytest.mark.parametrize("failure", ["read-503", "edit-403"])
+async def test_a_failed_join_notice_warns_once_and_the_phase_completes(
+    channel_attributes_only, tmp_path: Path, recorded_sleeps: list[float], failure: str
+) -> None:
+    """SC-4.1 and SC-4.2: the failure is one warning, with no Stoat text, and the phase ends."""
+    save_discord_metadata(_join_meta(), tmp_path)
+    config = _make_config(tmp_path, discord_token="tok")
+    state = MigrationState(stoat_server_id="srv1")
+    events: list[MigrationEvent] = []
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "S100", "name": "general"})
+        if failure == "read-503":
+            m.get(_JOIN_SERVER_URL, status=503, repeat=True)
+        else:
+            m.get(_JOIN_SERVER_URL, payload={"_id": "srv1"})
+            m.patch(_JOIN_SERVER_URL, status=403, payload={"type": "MissingPermission"})
+        await run_channels(config, state, [_join_export()], events.append)
+
+    assert state.channel_map == {"100": "S100"}  # the phase ran to its end
+    assert any(e.message == "Created 1 channels" for e in events)
+    assert state.join_notice_outcome == "edit_failed"
+    assert [w for w in state.warnings if w["type"] == "join_notice"] == [
+        {
+            "phase": "channels",
+            "type": "join_notice",
+            "message": JOIN_NOTICE_WORDING["edit_failed"],
+        }
+    ]
+    assert "MissingPermission" not in json.dumps(state.warnings)
