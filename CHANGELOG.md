@@ -30,6 +30,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - The test suite no longer passes the caller's git location variables (`GIT_DIR`, `GIT_COMMON_DIR` and the rest) to the git commands it runs. A test's `git init` or `git config` could otherwise act on the caller's own repository and turn it into a bare one (#1639).
 
+## [3.9.0] - 2026-11-28
+
+### Added
+
+- A migrated server now shows Stoat's "user joined" messages in the channel that matches Discord's system channel. Ferry sets it after the channels exist, only with a Discord token and the Discord server id, only when that channel was migrated, and not when Discord has join notices turned off. A Stoat server that already has a join channel keeps it, and the other three notice channels are sent back unchanged. The migration report and the progress log say what happened and why, and a failed edit adds one warning without stopping the migration (#1249).
+- Discord's system channel and its flags are now saved with the Discord metadata. Metadata saved by an older Ferry still loads, and the report says no system channel was recorded (#1249).
+
 ## [3.8.0] - 2026-11-27
 
 ### Fixed
