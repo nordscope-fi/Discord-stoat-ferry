@@ -74,7 +74,7 @@ if TYPE_CHECKING:
     from discord_ferry.core.events import EventCallback
     from discord_ferry.core.permissions import PermissionStage
     from discord_ferry.parser.models import DCEChannel, DCEExport
-    from discord_ferry.state import MigrationState
+    from discord_ferry.state import JoinNoticeCode, MigrationState
 
 logger = logging.getLogger(__name__)
 
@@ -1492,6 +1492,40 @@ def _forum_category_titles(
         titles[key] = candidate
         taken.add(truncate_name(candidate))
     return {key: titles[key] for key in forum_categories}
+
+
+# Discord's SUPPRESS_JOIN_NOTIFICATIONS system channel flag, `1 << 0` (discord-api-docs
+# developers/resources/guild.mdx, commit 62ab2d5). When it is set, Discord posts no join notice.
+_SUPPRESS_JOIN_NOTIFICATIONS = 1 << 0
+
+
+def _decide_join_notice(
+    config: FerryConfig, state: MigrationState, discord_metadata: DiscordMetadata | None
+) -> JoinNoticeCode | None:
+    """Decide the join-notice outcome that needs no Stoat request (#1249).
+
+    Returns the outcome code for the first rule that applies, in this order: no Discord token,
+    no usable Discord metadata, no recorded system channel, no system channel on Discord, join
+    notices suppressed on Discord, system channel not migrated, then a dry run (``would_set``).
+    Returns None when the system channel is mapped and a real run has to read the Stoat server.
+    Nothing here reads or sends anything.
+    """
+    if not config.discord_token:
+        return "no_discord_token"
+    if discord_metadata is None:
+        return "no_discord_metadata"
+    system_channel_id = discord_metadata.system_channel_id
+    if system_channel_id is None:
+        return "not_recorded"
+    if not system_channel_id:
+        return "none_on_discord"
+    if discord_metadata.system_channel_flags & _SUPPRESS_JOIN_NOTIFICATIONS:
+        return "suppressed_on_discord"
+    if system_channel_id not in state.channel_map:
+        return "channel_not_migrated"
+    if config.dry_run:
+        return "would_set"
+    return None
 
 
 async def run_channels(
