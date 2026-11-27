@@ -1244,6 +1244,56 @@ def test_report_masks_the_channel_name_of_a_validation_warning(tmp_path: Path) -
     assert written["warnings"][0]["type"] == "empty_export"
 
 
+def _picture_state() -> MigrationState:
+    base = "https://cdn.discordapp.com/avatars"
+    return MigrationState(
+        author_avatar_links={f"{n}": f"{base}/{n}/a.png" for n in (1, 2, 3)},
+        author_avatar_reasons={"4": "lookup_failed", "5": "no_picture", "6": "no_picture"},
+    )
+
+
+def test_report_counts_authors_by_picture_outcome(tmp_path: Path) -> None:
+    """SC-4.1: report.json carries the count with a picture and each reason's total."""
+    report = generate_report(_make_config(tmp_path), _picture_state(), [_make_export()])
+
+    expected = {"total": 6, "with_picture": 3, "no_picture": 2, "lookup_failed": 1}
+    assert report["author_pictures"] == expected
+    assert (
+        json.loads((tmp_path / "migration_report.json").read_text())["author_pictures"] == expected
+    )
+
+
+def test_report_records_pictures_as_skipped_when_skip_avatars_is_set(tmp_path: Path) -> None:
+    """SC-1.3: skip_avatars is reported as skipped, not as zero pictures."""
+    from dataclasses import replace
+
+    config = replace(_make_config(tmp_path), skip_avatars=True)
+    report = generate_report(config, _picture_state(), [_make_export()])
+    generate_markdown_report(config, _picture_state(), [_make_export()])
+
+    assert report["author_pictures"] == {"skipped": True}
+    text = (tmp_path / "migration_report.md").read_text(encoding="utf-8")
+    assert "## Author Pictures" in text
+    assert "Skipped. Migrated messages show no author picture." in text
+
+
+def test_markdown_report_lists_author_pictures_by_outcome(tmp_path: Path) -> None:
+    generate_markdown_report(_make_config(tmp_path), _picture_state(), [_make_export()])
+
+    text = (tmp_path / "migration_report.md").read_text(encoding="utf-8")
+    assert "## Author Pictures" in text
+    assert "| Authors | 6 |" in text
+    assert "| With a picture | 3 |" in text
+    assert "| no Discord picture | 2 |" in text
+    assert "| lookup failed | 1 |" in text
+    assert "| token rejected |" not in text
+
+
+def test_report_author_pictures_for_an_empty_state(tmp_path: Path) -> None:
+    report = generate_report(_make_config(tmp_path), MigrationState(), [_make_export()])
+    assert report["author_pictures"] == {"total": 0, "with_picture": 0}
+
+
 def test_report_leaves_state_warnings_raw_in_memory(tmp_path: Path) -> None:
     """Redaction happens on the way out, so in-memory assertions elsewhere still hold."""
     register_secret("proxy_password", "hunter2horse")
@@ -1289,6 +1339,7 @@ _KNOWN_REPORT_FIELDS = frozenset(
         "checklist",
         "invite",
         "native_fidelity",
+        "author_pictures",  # Integers keyed by fixed reason codes, so no free text (#1208).
         "permissions",  # Only problems[].guidance is free text, classified by the writer.
     }
 )
