@@ -42,6 +42,7 @@ from discord_ferry.exporter.runner import ExportRequest
 from discord_ferry.migrator import delivery as delivery_module
 from discord_ferry.migrator import messages as messages_module
 from discord_ferry.migrator.api import ServerReadView
+from discord_ferry.migrator.avatars import run_avatars
 from discord_ferry.migrator.structure import FERRY_MIN_PERMISSIONS
 from discord_ferry.migrator.verify import CheckReport, CheckResult, RepairOutcome
 from discord_ferry.parser.models import (
@@ -3565,6 +3566,170 @@ async def test_avatars_phase_runs_when_not_skipped(tmp_path: Path) -> None:
     avatar_events = [e for e in events if e.phase == "avatars"]
     assert any(e.status == "started" for e in avatar_events)
     assert any(e.status == "completed" for e in avatar_events)
+
+
+_PICTURE_HASH = "4551a51a7078abcdef0123456789abcd"
+_DISCORD_USERS = "https://discord.com/api/v10/users"
+
+
+def _export_by(*author_ids: str) -> DCEExport:
+    """One export holding one message per author, for the real avatars phase."""
+    return DCEExport(
+        guild=DCEGuild(id="g1", name="Test"),
+        channel=DCEChannel(id="c1", type=0, name="general"),
+        messages=[
+            DCEMessage(
+                id=f"m{author_id}",
+                type="Default",
+                timestamp="2024-01-01T00:00:00Z",
+                content="hi",
+                author=DCEAuthor(id=author_id, name=f"Author {author_id}"),
+            )
+            for author_id in author_ids
+        ],
+    )
+
+
+def _real_avatars_phase(source: DCEExport) -> PhaseFunction:
+    """The real avatars phase, reading this export instead of the engine's fixture exports."""
+
+    async def phase(
+        config: FerryConfig, state: MigrationState, exports: list, emit: EventCallback
+    ) -> None:
+        await run_avatars(config, state, [source], emit)
+
+    return phase
+
+
+def _looked_up(mock: aioresponses) -> list[str]:
+    """Author ids Discord was asked about. The engine also makes its own calls to Stoat."""
+    return sorted(
+        url.path.rsplit("/", 1)[1] for (_method, url) in mock.requests if url.host == "discord.com"
+    )
+
+
+def _mock_picture_lookups(mock: aioresponses, *author_ids: str) -> None:
+    for author_id in author_ids:
+        mock.get(
+            f"{_DISCORD_USERS}/{author_id}", payload={"id": author_id, "avatar": _PICTURE_HASH}
+        )
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_resume_inside_the_avatars_phase_asks_only_for_token_dependent_authors(
+    tmp_path: Path,
+) -> None:
+    """SC-5.2 through the engine: current_phase 'avatars' re-runs the phase."""
+    from discord_ferry.state import save_state
+
+    link = f"https://cdn.discordapp.com/avatars/1/{_PICTURE_HASH}.png"
+    prior = MigrationState(
+        current_phase="avatars",
+        started_at="2024-01-01T00:00:00+00:00",
+        author_avatar_links={"1": link},
+        author_avatar_reasons={"2": "no_picture", "3": "token_rejected", "4": "no_discord_token"},
+    )
+    save_state(prior, tmp_path)
+    config = _make_config(tmp_path, resume=True, discord_token="Bot resume-token")
+    overrides = {**_NOOP_OVERRIDES, "avatars": _real_avatars_phase(_export_by("1", "2", "3", "4"))}
+
+    with aioresponses() as mock:
+        _mock_picture_lookups(mock, "3", "4")
+        state = await run_migration(config, lambda e: None, phase_overrides=overrides)
+        asked = _looked_up(mock)
+
+    assert asked == ["3", "4"]
+    assert state.author_avatar_links["1"] == link
+    assert state.author_avatar_reasons == {"2": "no_picture"}
+    assert set(state.author_avatar_links) == {"1", "3", "4"}
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_resume_after_messages_started_does_not_rerun_the_avatars_phase(
+    tmp_path: Path,
+) -> None:
+    """SC-5.3: past the avatars phase, a token-dependent reason stands for the run."""
+    from discord_ferry.state import save_state
+
+    prior = MigrationState(
+        current_phase="messages",
+        started_at="2024-01-01T00:00:00+00:00",
+        author_avatar_reasons={"5": "token_rejected"},
+    )
+    save_state(prior, tmp_path)
+    config = _make_config(tmp_path, resume=True, discord_token="Bot working-token")
+    events: list[MigrationEvent] = []
+    overrides = {**_NOOP_OVERRIDES, "avatars": _real_avatars_phase(_export_by("5"))}
+
+    with aioresponses() as mock:
+        _mock_picture_lookups(mock, "5")
+        state = await run_migration(config, events.append, phase_overrides=overrides)
+        assert _looked_up(mock) == []
+
+    assert any(e.phase == "avatars" and e.status == "skipped" for e in events)
+    assert state.author_avatar_reasons == {"5": "token_rejected"}
+    assert state.author_avatar_links == {}
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_an_interrupted_avatars_phase_resumes_to_the_same_maps_as_a_clean_run(
+    tmp_path: Path,
+) -> None:
+    """SC-I3: crash before the fourth lookup, resume, and compare with an uninterrupted run."""
+    from discord_ferry.discord import client as discord_client
+    from discord_ferry.migrator import avatars as avatars_module
+
+    author_ids = ["701", "702", "703", "704", "705"]
+    overrides = {**_NOOP_OVERRIDES, "avatars": _real_avatars_phase(_export_by(*author_ids))}
+    real_fetch_user = discord_client.fetch_user
+
+    clean_dir = tmp_path / "clean"
+    clean_dir.mkdir()
+    with aioresponses() as mock:
+        _mock_picture_lookups(mock, *author_ids)
+        clean = await run_migration(
+            _make_config(clean_dir, discord_token="Bot clean-token"),
+            lambda e: None,
+            phase_overrides=overrides,
+        )
+
+    interrupted_dir = tmp_path / "interrupted"
+    interrupted_dir.mkdir()
+    lookups: list[str] = []
+    interrupt = True
+
+    async def fetch_then_crash(session: Any, token: str, user_id: str) -> dict[str, Any]:
+        if interrupt and len(lookups) == 3:
+            raise RuntimeError("the process died here")
+        lookups.append(user_id)
+        return await real_fetch_user(session, token, user_id)
+
+    with (
+        aioresponses() as mock,
+        patch.object(avatars_module, "fetch_user", fetch_then_crash),
+    ):
+        _mock_picture_lookups(mock, *author_ids[:3])
+        with pytest.raises(MigrationError, match="avatars"):
+            await run_migration(
+                _make_config(interrupted_dir, discord_token="Bot interrupted-token"),
+                lambda e: None,
+                phase_overrides=overrides,
+            )
+        assert load_state(interrupted_dir).current_phase == "avatars"
+        assert lookups == author_ids[:3]
+
+        interrupt = False
+        _mock_picture_lookups(mock, *author_ids[3:])
+        resumed = await run_migration(
+            _make_config(interrupted_dir, discord_token="Bot interrupted-token", resume=True),
+            lambda e: None,
+            phase_overrides=overrides,
+        )
+
+    assert lookups == author_ids  # five lookups across both runs, none repeated
+    assert resumed.author_avatar_links == clean.author_avatar_links
+    assert resumed.author_avatar_reasons == clean.author_avatar_reasons
+    assert len(resumed.author_avatar_links) == 5
 
 
 def test_phase_order_contains_expected_phases() -> None:
