@@ -66,7 +66,13 @@ from discord_ferry.migrator.verify import read_permission_context, verify_permis
 from discord_ferry.parser.dce_parser import stream_messages
 from discord_ferry.parser.media_paths import contained_media_path
 from discord_ferry.parser.models import DCERole
-from discord_ferry.state import DeliveryRef, consume_delivery, read_delivery_receipt, save_state
+from discord_ferry.state import (
+    JOIN_NOTICE_WORDING,
+    DeliveryRef,
+    consume_delivery,
+    read_delivery_receipt,
+    save_state,
+)
 from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS, upload_to_autumn, upload_with_cache
 
 if TYPE_CHECKING:
@@ -1526,6 +1532,96 @@ def _decide_join_notice(
     if config.dry_run:
         return "would_set"
     return None
+
+
+async def _write_join_notice(
+    config: FerryConfig,
+    state: MigrationState,
+    session: aiohttp.ClientSession,
+    stoat_channel_id: str,
+) -> JoinNoticeCode:
+    """Read the Stoat server, then set its join channel unless it already has one (#1249).
+
+    Returns ``set`` when the server already names ``stoat_channel_id`` or the edit went through,
+    ``kept_existing`` when it names another channel, and ``edit_failed`` when the read or the
+    edit raised ``MigrationError`` or ``TimeoutError`` (a plain ``TimeoutError`` escapes the
+    request helper's retry loop) or the read was not a JSON object. Stoat's error text is not
+    kept.
+    """
+    try:
+        fetched = await api_fetch_server(
+            session, config.stoat_url, config.token, state.stoat_server_id
+        )
+        # _api_request can return other JSON shapes despite its dict annotation.
+        server: object = fetched
+        if not isinstance(server, dict):
+            return "edit_failed"
+        notices: object = server.get("system_messages")
+        current: dict[str, Any] = notices if isinstance(notices, dict) else {}
+        user_joined = current.get("user_joined")
+        if user_joined == stoat_channel_id:
+            return "set"
+        if user_joined not in (None, ""):
+            return "kept_existing"
+        # PATCH replaces the whole object, so send the other three back as the server has
+        # them. An absent key stays absent: it is never sent as null.
+        body: dict[str, str] = {"user_joined": stoat_channel_id}
+        for key in ("user_left", "user_kicked", "user_banned"):
+            value = current.get(key)
+            if isinstance(value, str) and value:
+                body[key] = value
+        await api_edit_server(
+            session, config.stoat_url, config.token, state.stoat_server_id, system_messages=body
+        )
+    except (MigrationError, TimeoutError):
+        return "edit_failed"
+    return "set"
+
+
+def _record_join_notice(
+    state: MigrationState, code: JoinNoticeCode, on_event: EventCallback
+) -> None:
+    """Save the outcome, report it in its fixed wording, and warn once when the edit failed."""
+    state.join_notice_outcome = code
+    failed = code == "edit_failed"
+    on_event(
+        MigrationEvent(
+            phase="channels",
+            status="warning" if failed else "progress",
+            message=JOIN_NOTICE_WORDING[code],
+        )
+    )
+    if failed:
+        state.warnings.append(
+            {
+                "phase": "channels",
+                "type": "join_notice",
+                "message": JOIN_NOTICE_WORDING[code],
+            }
+        )
+
+
+async def _apply_join_notice(
+    config: FerryConfig,
+    state: MigrationState,
+    session: aiohttp.ClientSession | None,
+    discord_metadata: DiscordMetadata | None,
+    on_event: EventCallback,
+) -> None:
+    """Decide and record the join-notice outcome, sending at most one server edit (#1249).
+
+    ``session`` is None only in a dry run, which never reaches the Stoat request.
+    """
+    code = _decide_join_notice(config, state, discord_metadata)
+    if code is None:
+        # Only a real run gets here, and it has a session and a mapped system channel.
+        assert session is not None
+        assert discord_metadata is not None
+        assert discord_metadata.system_channel_id
+        code = await _write_join_notice(
+            config, state, session, state.channel_map[discord_metadata.system_channel_id]
+        )
+    _record_join_notice(state, code, on_event)
 
 
 async def run_channels(

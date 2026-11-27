@@ -9235,3 +9235,250 @@ def test_join_notice_decision_survives_hand_edited_flags(tmp_path: Path, bad_fla
     )
 
     assert outcome == "would_set"
+
+
+_JOIN_SERVER_URL = f"{STOAT_URL}/servers/srv1"
+
+
+async def _apply_join(
+    tmp_path: Path,
+    *,
+    meta: DiscordMetadata | None,
+    server_reply: dict[str, object] | list[object] | None,
+    patch_reply: dict[str, object] | None = None,
+    channel_map: dict[str, str] | None = None,
+    token: str | None = "tok",
+    get_status: int = 200,
+    get_exception: BaseException | None = None,
+    patch_status: int = 200,
+) -> tuple[MigrationState, list[MigrationEvent], list[dict[str, object]], list[tuple[str, str]]]:
+    """Run _apply_join_notice against a mocked Stoat server.
+
+    Returns the state, the events, every PATCH body, and every (method, url) the mock saw.
+    """
+    config = _make_config(tmp_path, discord_token=token)
+    state = MigrationState(
+        stoat_server_id="srv1",
+        channel_map=dict(_JOIN_MAPPED if channel_map is None else channel_map),
+    )
+    events: list[MigrationEvent] = []
+    bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        if get_exception is not None:
+            m.get(_JOIN_SERVER_URL, exception=get_exception)
+        elif server_reply is not None:
+            m.get(_JOIN_SERVER_URL, status=get_status, payload=server_reply)
+        m.patch(
+            _JOIN_SERVER_URL,
+            status=patch_status,
+            payload=patch_reply or {"_id": "srv1"},
+            callback=lambda url, **kwargs: bodies.append(kwargs.get("json", {})),
+        )
+        async with aiohttp.ClientSession() as session:
+            await structure_module._apply_join_notice(config, state, session, meta, events.append)
+        seen = [(method, str(url)) for method, url in m.requests]
+    return state, events, bodies, seen
+
+
+async def test_join_notice_is_set_with_one_edit(tmp_path: Path) -> None:
+    """SC-1.1: a mapped, unsuppressed system channel gives exactly one PATCH."""
+    state, events, bodies, _ = await _apply_join(
+        tmp_path, meta=_join_meta(), server_reply={"_id": "srv1"}
+    )
+
+    assert bodies == [{"system_messages": {"user_joined": "S100"}}]
+    assert state.join_notice_outcome == "set"
+    assert [e.message for e in events] == [JOIN_NOTICE_WORDING["set"]]
+    assert state.warnings == []
+
+
+@pytest.mark.parametrize(
+    ("meta", "channel_map", "token", "expected"),
+    [
+        pytest.param(_join_meta(""), None, "tok", "none_on_discord", id="none-on-discord"),
+        pytest.param(
+            _join_meta(system_channel_flags=1),
+            None,
+            "tok",
+            "suppressed_on_discord",
+            id="suppressed",
+        ),
+        pytest.param(
+            _join_meta(system_channel_flags=0b101),
+            None,
+            "tok",
+            "suppressed_on_discord",
+            id="suppressed-other-bits",
+        ),
+        pytest.param(_join_meta(), {}, "tok", "channel_not_migrated", id="not-migrated"),
+        pytest.param(None, None, None, "no_discord_token", id="no-token"),
+        pytest.param(None, None, "tok", "no_discord_metadata", id="no-metadata"),
+        pytest.param(_join_meta(None), None, "tok", "not_recorded", id="not-recorded"),
+    ],
+)
+async def test_join_notice_outcomes_that_send_nothing(
+    tmp_path: Path,
+    meta: DiscordMetadata | None,
+    channel_map: dict[str, str] | None,
+    token: str | None,
+    expected: str,
+) -> None:
+    """SC-1.2 to SC-1.6: no read, no edit, the outcome and its fixed wording recorded."""
+    state, events, bodies, seen = await _apply_join(
+        tmp_path, meta=meta, server_reply=None, channel_map=channel_map, token=token
+    )
+
+    assert seen == []
+    assert bodies == []
+    assert state.join_notice_outcome == expected
+    assert [e.message for e in events] == [JOIN_NOTICE_WORDING[expected]]
+
+
+async def test_an_existing_different_join_channel_is_kept(tmp_path: Path) -> None:
+    """SC-2.1: another channel in user_joined is never changed."""
+    state, _, bodies, _ = await _apply_join(
+        tmp_path,
+        meta=_join_meta(),
+        server_reply={"_id": "srv1", "system_messages": {"user_joined": "OTHER"}},
+    )
+
+    assert bodies == []
+    assert state.join_notice_outcome == "kept_existing"
+
+
+async def test_a_join_channel_that_is_already_ours_counts_as_set(tmp_path: Path) -> None:
+    """SC-2.2: a second run, or a resume after the edit, makes no further change."""
+    state, _, bodies, _ = await _apply_join(
+        tmp_path,
+        meta=_join_meta(),
+        server_reply={"_id": "srv1", "system_messages": {"user_joined": "S100"}},
+    )
+
+    assert bodies == []
+    assert state.join_notice_outcome == "set"
+
+
+async def test_the_other_notice_channels_are_sent_back_unchanged(tmp_path: Path) -> None:
+    """SC-2.3: user_left and user_banned come back as read, user_kicked is left out."""
+    _, _, bodies, _ = await _apply_join(
+        tmp_path,
+        meta=_join_meta(),
+        server_reply={"_id": "srv1", "system_messages": {"user_left": "L", "user_banned": "B"}},
+    )
+
+    assert bodies == [
+        {"system_messages": {"user_joined": "S100", "user_left": "L", "user_banned": "B"}}
+    ]
+    assert "null" not in json.dumps(bodies)
+
+
+@pytest.mark.parametrize(
+    "server_reply",
+    [
+        pytest.param({"_id": "srv1"}, id="no-key"),
+        pytest.param({"_id": "srv1", "system_messages": {}}, id="empty-object"),
+        pytest.param(
+            {"_id": "srv1", "system_messages": {"user_joined": None, "user_left": None}},
+            id="explicit-nulls",
+        ),
+    ],
+)
+async def test_absent_notice_keys_are_never_sent_as_null(
+    tmp_path: Path, server_reply: dict[str, object]
+) -> None:
+    """SC-2.4: only user_joined is sent, and the body holds no null."""
+    _, _, bodies, _ = await _apply_join(tmp_path, meta=_join_meta(), server_reply=server_reply)
+
+    assert bodies == [{"system_messages": {"user_joined": "S100"}}]
+    assert "null" not in json.dumps(bodies)
+
+
+def _assert_one_join_failure(state: MigrationState, events: list[MigrationEvent]) -> None:
+    assert state.join_notice_outcome == "edit_failed"
+    assert [(w["phase"], w["type"], w["message"]) for w in state.warnings] == [
+        ("channels", "join_notice", JOIN_NOTICE_WORDING["edit_failed"])
+    ]
+    assert [(e.status, e.message) for e in events] == [
+        ("warning", JOIN_NOTICE_WORDING["edit_failed"])
+    ]
+
+
+async def test_a_failed_read_is_reported_once_and_does_not_raise(
+    tmp_path: Path, recorded_sleeps: list[float]
+) -> None:
+    """SC-4.1 (decision level): a read that keeps failing with 503 becomes edit_failed."""
+    config = _make_config(tmp_path, discord_token="tok")
+    state = MigrationState(stoat_server_id="srv1", channel_map=dict(_JOIN_MAPPED))
+    events: list[MigrationEvent] = []
+    with aioresponses() as m:
+        m.get(_JOIN_SERVER_URL, status=503, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            await structure_module._apply_join_notice(
+                config, state, session, _join_meta(), events.append
+            )
+        assert not [key for key in m.requests if key[0] == "PATCH"]
+
+    _assert_one_join_failure(state, events)
+    assert recorded_sleeps  # the request helper retried before giving up
+
+
+async def test_a_refused_edit_is_reported_without_stoat_error_text(tmp_path: Path) -> None:
+    """SC-4.2 (decision level): a 403 from the edit becomes edit_failed and keeps no body."""
+    state, events, _, _ = await _apply_join(
+        tmp_path,
+        meta=_join_meta(),
+        server_reply={"_id": "srv1"},
+        patch_reply={"type": "MissingPermission", "permission": "ManageServer"},
+        patch_status=403,
+    )
+
+    _assert_one_join_failure(state, events)
+    assert "MissingPermission" not in json.dumps(state.warnings)
+    assert "ManageServer" not in json.dumps(state.warnings)
+
+
+async def test_a_timeout_on_the_read_is_treated_like_any_failure(tmp_path: Path) -> None:
+    """SC-4.3: a plain TimeoutError from the read does not escape."""
+    state, events, bodies, _ = await _apply_join(
+        tmp_path, meta=_join_meta(), server_reply=None, get_exception=TimeoutError()
+    )
+
+    assert bodies == []
+    _assert_one_join_failure(state, events)
+
+
+async def test_a_read_that_is_not_an_object_is_a_failure(tmp_path: Path) -> None:
+    """SC-4.4: a JSON list from the read means no edit and edit_failed."""
+    state, events, bodies, _ = await _apply_join(
+        tmp_path, meta=_join_meta(), server_reply=["not", "a", "server"]
+    )
+
+    assert bodies == []
+    _assert_one_join_failure(state, events)
+
+
+@pytest.mark.parametrize(
+    ("meta", "channel_map", "expected"),
+    [
+        pytest.param(
+            _join_meta(system_channel_flags=1),
+            {},
+            "suppressed_on_discord",
+            id="suppressed-unmapped",
+        ),
+        pytest.param(
+            _join_meta("", system_channel_flags=1),
+            _JOIN_MAPPED,
+            "none_on_discord",
+            id="none-and-suppressed",
+        ),
+    ],
+)
+def test_join_notice_rules_that_overlap_keep_the_design_order(
+    tmp_path: Path, meta: DiscordMetadata, channel_map: dict[str, str], expected: str
+) -> None:
+    """When two rules both apply, the earlier one in the design wins (chunk 2 review gap)."""
+    config = _make_config(tmp_path, discord_token="tok")
+    state = MigrationState(channel_map=dict(channel_map))
+
+    assert structure_module._decide_join_notice(config, state, meta) == expected
